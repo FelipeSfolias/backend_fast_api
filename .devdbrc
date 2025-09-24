@@ -1,0 +1,6 @@
+[
+  {
+    "type": "sqlite",
+    "path": "c:\\Fontes\\backend\\data\\events.db"
+  }
+]

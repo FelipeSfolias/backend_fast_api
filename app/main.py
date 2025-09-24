@@ -14,6 +14,10 @@ from app.db.bootstrap import run_migrations_and_seed  # <- AQUI (não de init_db
 api = FastAPI(title="Eventos API", version="1.0.0")
 api.include_router(api_router, prefix="/api/v1")
 
+@api.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
 @api.on_event("startup")
 def on_startup():
     run_migrations_and_seed()
