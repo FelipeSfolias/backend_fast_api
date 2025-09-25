@@ -1,54 +1,46 @@
 # migrations/env.py
-from __future__ import annotations
-import os, sys
-from logging.config import fileConfig
+import os
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from app.db.base import Base
 
-# --- permite importar "app.*" (ajuste o caminho se precisar) ---
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+# (1) carregar .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
-from app.core.config import settings
-from app.db.base import Base  # Base.metadata com todos os modelos importados
+# (2) normalizar URL
+def _normalize(url: str) -> str:
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
 
 config = context.config
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
 
-# pega a URL do settings (SQLite, Postgres, etc.)
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+db_url = os.getenv("DATABASE_URL")
+if not db_url or db_url.strip() == "":
+    db_url = "sqlite:///./data/events.db"  # fallback
+db_url = _normalize(db_url)
+
+# (3) Alembic usará esta URL
+config.set_main_option("sqlalchemy.url", db_url)
+
 target_metadata = Base.metadata
 
-def run_migrations_offline() -> None:
+def run_migrations_offline():
     url = config.get_main_option("sqlalchemy.url")
-    context.configure(
-        url=url,
-        target_metadata=target_metadata,
-        literal_binds=True,
-        render_as_batch=True,   # necessário p/ SQLite
-        compare_type=True,
-        compare_server_default=True,
-    )
+    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():
         context.run_migrations()
 
-def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section) or {},
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-        future=True,
-    )
+def run_migrations_online():
+    connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            render_as_batch=True,  # necessário p/ SQLite
-            compare_type=True,
-            compare_server_default=True,
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
 

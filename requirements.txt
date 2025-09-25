@@ -14,5 +14,7 @@ Jinja2>=3.1
 alembic>=1.16.4
 uvicorn[standard]
 python-multipart
-psycopg[binary]
 gunicorn
+uvicorn[standard]
+psycopg2-binary==2.9.*
+python-dotenv
