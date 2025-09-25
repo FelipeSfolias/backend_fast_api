@@ -13,3 +13,6 @@ tzdata>=2024.1
 Jinja2>=3.1
 alembic>=1.16.4
 uvicorn[standard]
+python-multipart
+psycopg[binary]
+gunicorn

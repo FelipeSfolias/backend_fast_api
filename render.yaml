@@ -1,14 +1,16 @@
+# render.yaml
 services:
   - type: web
     name: events-backend
     env: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: >
       gunicorn app.main:api -k uvicorn.workers.UvicornWorker
       -b 0.0.0.0:$PORT --workers 2 --timeout 60
     healthCheckPath: /healthz
+    preDeployCommand: alembic upgrade head
     autoDeploy: true
     envVars:
       - key: DATABASE_URL
