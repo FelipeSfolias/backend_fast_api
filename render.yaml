@@ -1,27 +1,28 @@
-# Exported from Render on 2025-09-25T13:38:09Z
-version: "1"
 services:
-- type: web
-  name: events-backend
-  runtime: python
-  repo: https://github.com/FelipeSfolias/backend_fast_api
-  plan: free
-  envVars:
-  - key: TIMEZONE
-    sync: false
-  - key: REFRESH_TOKEN_EXPIRE_DAYS
-    sync: false
-  - key: ACCESS_TOKEN_EXPIRE_MINUTES
-    sync: false
-  - key: REFRESH_SECRET_KEY
-    sync: false
-  - key: SECRET_KEY
-    sync: false
-  - key: DATABASE_URL
-    sync: false
-  region: oregon
-  buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-  startCommand: |
-    bash -lc "alembic upgrade head && gunicorn app.main:api -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 2 --timeout 60"
-  healthCheckPath: /healthz
-  autoDeployTrigger: commit
+  - type: web
+    name: events-backend
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      bash -lc "alembic upgrade head &&
+      gunicorn app.main:api -k uvicorn.workers.UvicornWorker
+      -b 0.0.0.0:$PORT --workers 2 --timeout 60"
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: events-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: REFRESH_SECRET_KEY
+        generateValue: true
+      - key: TIMEZONE
+        value: America/Sao_Paulo
+
+databases:
+  - name: events-db
+    plan: free
+    databaseName: events_0qht
+    user: events_user
