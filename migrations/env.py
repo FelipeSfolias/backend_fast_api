@@ -3,7 +3,11 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from app.db.base import Base
 
-# carregar .env
+import os
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+from app.db.base import Base
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -22,6 +26,8 @@ db_url = _normalize(os.getenv("DATABASE_URL") or "sqlite:///./data/events.db")
 config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
+# ... restante igual (run_migrations_offline/online) ...
+
 
 def run_migrations_offline():
     context.configure(url=db_url, target_metadata=target_metadata, literal_binds=True)

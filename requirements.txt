@@ -16,5 +16,5 @@ uvicorn[standard]
 python-multipart
 gunicorn
 uvicorn[standard]
-psycopg2-binary==2.9.*
+psycopg[binary]
 python-dotenv
