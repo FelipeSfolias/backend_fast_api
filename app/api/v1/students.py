@@ -10,6 +10,8 @@ from app.models.student import Student as StudentModel
 from sqlalchemy import select
 from app.models.student import Student as StudentModel
 from fastapi import HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Path
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 
@@ -65,3 +67,34 @@ def delete_student(student_id: int, db: Session = Depends(get_db), tenant=Depend
     if not s or s.client_id != tenant.id: raise HTTPException(404)
     db.delete(s); db.commit()
     return {"ok": True}
+
+@router.patch("/{student_id}")
+def update_student(
+    tenant = Depends(get_tenant),
+    student_id: int = Path(...),
+    payload: StudentUpdate = ...,
+    db: Session = Depends(get_db),
+    _user = Depends(get_current_user_scoped),
+):
+    st = db.get(Student, student_id)
+    if not st or st.client_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(st, k, v)
+
+    db.add(st)
+    db.commit()
+    db.refresh(st)
+
+    return {
+        "id": st.id,
+        "client_id": st.client_id,
+        "name": st.name,
+        "cpf": st.cpf,
+        "email": st.email,
+        "ra": st.ra,
+        "phone": st.phone,
+    }
+
