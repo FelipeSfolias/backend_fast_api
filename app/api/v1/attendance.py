@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from api.deps import get_db, get_tenant, get_current_user_scoped
+from backend_fast_api.app.api.deps import get_db, get_tenant, get_current_user_scoped
 from models.attendance import Attendance
 from models.enrollment import Enrollment
 import datetime as dt
