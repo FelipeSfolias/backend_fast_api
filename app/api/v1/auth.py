@@ -62,12 +62,16 @@ if _mk_access is None or _mk_refresh is None:
         return _jwt_encode({"sub": sub, "tenant": tenant, "scope": scope, "type": "refresh"},
                            days=REFRESH_DAYS)
 
-def issue_tokens_for(user, tenant, scope: str = "") -> dict:
-    """Devolve o payload esperado pelo seu Swagger."""
-    sub = getattr(user, "email", None) or getattr(user, "username")
-    access = _mk_access(sub=sub, tenant=tenant.slug, scope=scope)
-    refresh = _mk_refresh(sub=sub, tenant=tenant.slug, scope=scope)
-    return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
+from core.tokens import create_access_token, create_refresh_token
+
+def issue_tokens_for(user, tenant, scope: str = ""):
+    sub = user.email
+    return {
+        "access_token": create_access_token(sub=sub, tenant=tenant.slug, scope=scope),
+        "refresh_token": create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope),
+        "token_type": "bearer",
+    }
+
 
 
 def _get_token_from_body_or_query(token_body: str | None, token_query: str | None) -> str:
