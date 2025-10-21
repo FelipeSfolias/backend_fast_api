@@ -13,12 +13,12 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
-from api.deps import get_db, get_tenant, get_current_user_scoped
-from models.event import Event
-from models.enrollment import Enrollment
-from models.attendance import Attendance
-from models.certificate import Certificate
-from models.client import Client  # se existir
+from app.api.deps import get_db, get_tenant, get_current_user_scoped
+from app.models.event import Event
+from app.models.enrollment import Enrollment
+from app.models.attendance import Attendance
+from app.models.certificate import Certificate
+from app.models.client import Client  # se existir
 import secrets, datetime as dt
 
 
