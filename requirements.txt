@@ -18,3 +18,5 @@ gunicorn
 uvicorn[standard]
 psycopg[binary]
 python-dotenv
+passlib
+argon2-cffi

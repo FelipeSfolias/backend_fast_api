@@ -33,7 +33,7 @@ def init_db(db: Session) -> None:
         )
         db.add(tenant); db.flush()
 
-    # Admin
+    # Usuário admin@demo
     admin = db.scalar(select(User).where(User.client_id == tenant.id, User.email == "admin@demo"))
     if not admin:
         admin = User(

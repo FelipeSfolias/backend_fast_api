@@ -26,6 +26,50 @@ from app.models.tokens import RefreshToken
 
 router = APIRouter()
 
+# backend/api/v1/auth.py
+from datetime import datetime, timedelta
+
+# 1) Tenta usar funções já existentes no seu projeto, se houver
+try:
+    from core.security import create_access_token as _mk_access  # ou encode_access
+except Exception:
+    _mk_access = None
+try:
+    from core.security import create_refresh_token as _mk_refresh  # ou encode_refresh
+except Exception:
+    _mk_refresh = None
+
+# 2) Se não houver, usa um fallback local com jose
+if _mk_access is None or _mk_refresh is None:
+    from jose import jwt
+    from core.config import settings
+
+    ALGO = getattr(settings, "ALGORITHM", "HS256")
+    ACCESS_MIN = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+    REFRESH_DAYS = int(getattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", 7))
+
+    def _jwt_encode(payload: dict, minutes: int = 0, days: int = 0) -> str:
+        now = datetime.utcnow()
+        exp = now + timedelta(minutes=minutes, days=days)
+        to_encode = {**payload, "iat": now, "exp": exp}
+        return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGO)
+
+    def _mk_access(*, sub: str, tenant: str, scope: str = "") -> str:
+        return _jwt_encode({"sub": sub, "tenant": tenant, "scope": scope, "type": "access"},
+                           minutes=ACCESS_MIN)
+
+    def _mk_refresh(*, sub: str, tenant: str, scope: str = "") -> str:
+        return _jwt_encode({"sub": sub, "tenant": tenant, "scope": scope, "type": "refresh"},
+                           days=REFRESH_DAYS)
+
+def issue_tokens_for(user, tenant, scope: str = "") -> dict:
+    """Devolve o payload esperado pelo seu Swagger."""
+    sub = getattr(user, "email", None) or getattr(user, "username")
+    access = _mk_access(sub=sub, tenant=tenant.slug, scope=scope)
+    refresh = _mk_refresh(sub=sub, tenant=tenant.slug, scope=scope)
+    return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
+
+
 def _get_token_from_body_or_query(token_body: str | None, token_query: str | None) -> str:
     tok = token_body or token_query
     if not tok:
@@ -33,56 +77,60 @@ def _get_token_from_body_or_query(token_body: str | None, token_query: str | Non
         raise HTTPException(status_code=422, detail=[{"loc":["token"],"msg":"Field required","type":"value_error.missing"}])
     return tok
 
-# IMPORTANTE: como esse router será montado em "/{tenant}/auth",
-# aqui os paths são APENAS "/login", "/refresh", "/logout", etc.
-@router.post("/login", response_model=TokenPair)
-def login(
-    form: OAuth2PasswordRequestForm = Depends(),
+# backend/api/v1/auth.py
+from app.core.security_password import verify_and_maybe_upgrade
+# ...
+
+@router.post("/login")
+def login(  # (exemplo com OAuth2PasswordRequestForm)
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
 ):
     user = db.execute(
-        select(User).where(User.email == form.username, User.client_id == tenant.id)
+        select(User).where(User.email == form_data.username, User.client_id == tenant.id)
     ).scalar_one_or_none()
-    if not user or not verify_password(form.password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid_credentials")
 
-    access = create_access_token(subject=user.email, tenant_slug=tenant.slug)
-    refresh = create_refresh_token(subject=user.email, tenant_slug=tenant.slug)
-    payload = decode_refresh(refresh)
+    ok, new_hash = verify_and_maybe_upgrade(form_data.password, user.password_hash)
+    if not ok:
+        raise HTTPException(status_code=401, detail="invalid_credentials")
 
-    db.add(RefreshToken(
-        jti=payload["jti"],
-        user_email=user.email,
-        tenant_slug=tenant.slug,
-        expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-    ))
-    db.commit()
+    if new_hash:
+        user.password_hash = new_hash
+        db.add(user)
+        db.commit()
 
-    return TokenPair(access_token=access, refresh_token=refresh)
+    # ... gere os tokens e retorne (acesso/refresh)
+    return issue_tokens_for(user, tenant)  # exemplo
 
-# opcional: login via JSON
-@router.post("/login-json", response_model=TokenPair)
-def login_json(body: LoginRequest, db: Session = Depends(get_db), tenant = Depends(get_tenant)):
+
+from pydantic import BaseModel, EmailStr
+# ...
+class LoginJSON(BaseModel):
+    username: EmailStr
+    password: str
+
+@router.post("/login-json")
+def login_json(payload: LoginJSON, db: Session = Depends(get_db), tenant = Depends(get_tenant)):
     user = db.execute(
-        select(User).where(User.email == body.username, User.client_id == tenant.id)
+        select(User).where(User.email == payload.username, User.client_id == tenant.id)
     ).scalar_one_or_none()
-    if not user or not verify_password(body.password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    if not user:
+        raise HTTPException(status_code=401, detail="invalid_credentials")
 
-    access = create_access_token(subject=user.email, tenant_slug=tenant.slug)
-    refresh = create_refresh_token(subject=user.email, tenant_slug=tenant.slug)
-    payload = decode_refresh(refresh)
+    ok, new_hash = verify_and_maybe_upgrade(payload.password, user.password_hash)
+    if not ok:
+        raise HTTPException(status_code=401, detail="invalid_credentials")
 
-    db.add(RefreshToken(
-        jti=payload["jti"],
-        user_email=user.email,
-        tenant_slug=tenant.slug,
-        expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-    ))
-    db.commit()
+    if new_hash:
+        user.password_hash = new_hash
+        db.add(user)
+        db.commit()
 
-    return TokenPair(access_token=access, refresh_token=refresh)
+    return issue_tokens_for(user, tenant)
+
 
 @router.post("/refresh", response_model=TokenPair)
 def refresh(

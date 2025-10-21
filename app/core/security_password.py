@@ -1,26 +1,19 @@
-# core/security_password.py
+# backend/core/security_password.py
 from __future__ import annotations
 from passlib.context import CryptContext
 
 pwd_context = CryptContext(
-    # aceita hashes antigos em bcrypt; novo padrão é argon2id
     schemes=["argon2", "bcrypt_sha256", "bcrypt"],
     deprecated="auto",
-    # parâmetros razoáveis p/ server comum (ajuste se quiser endurecer):
     argon2__time_cost=2,
     argon2__memory_cost=19456,  # ~19 MB
     argon2__parallelism=1,
 )
 
 def hash_password(plain: str) -> str:
-    # sem truncar: Argon2 não tem limite de 72 bytes
     return pwd_context.hash(plain)
 
 def verify_and_maybe_upgrade(plain: str, stored_hash: str) -> tuple[bool, str | None]:
-    """
-    Retorna (ok, new_hash_ou_None). Se a senha confere e o hash é 'antigo'
-    (ex.: bcrypt), devolve um novo hash em Argon2 para você salvar.
-    """
     ok = pwd_context.verify(plain, stored_hash)
     if not ok:
         return False, None
