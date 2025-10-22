@@ -32,3 +32,16 @@ def decode_refresh(token: str):
         return data if data.get("type") == "refresh" else None
     except JWTError:
         return None
+
+# app/core/tokens.py
+try:
+    from .config import settings
+except Exception:
+    # fallback p/ Render (env vars)
+    import os
+    class _Settings:
+        SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
+        ALGORITHM = os.getenv("ALGORITHM", "HS256")
+        ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+        REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+    settings = _Settings()
