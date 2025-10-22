@@ -72,7 +72,7 @@ if _mk_access is None or _mk_refresh is None:
         return _jwt_encode({"sub": sub, "tenant": tenant, "scope": scope, "type": "refresh"},
                            days=REFRESH_DAYS)
 
-from core.tokens import create_access_token, create_refresh_token
+from app.core.tokens import create_access_token, create_refresh_token
 
 def issue_tokens_for(user, tenant, scope: str = ""):
     sub = user.email
