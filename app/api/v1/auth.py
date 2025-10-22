@@ -5,10 +5,21 @@ from sqlalchemy import select
 from datetime import datetime, timezone
 
 from app.api.deps import get_db, get_tenant
-from app.core.security import (
-    verify_password, get_password_hash,
-    create_access_token, create_refresh_token, decode_refresh
+# app/api/v1/auth.py
+
+# ⬇️ Tokens (create/refresh/decoders)
+from app.core.tokens import (
+    create_access_token,
+    create_refresh_token,
+    decode_refresh,
 )
+
+# ⬇️ Senhas (Argon2id + fallback bcrypt)
+from app.core.security_password import (
+    verify_and_maybe_upgrade,
+    hash_password,
+)
+
 from app.schemas.auth import TokenPair, LoginRequest
 from app.schemas.user import UserCreate
 from app.models.user import User
@@ -175,7 +186,7 @@ def signup(body: UserCreate, db: Session = Depends(get_db), tenant = Depends(get
         raise HTTPException(status_code=400, detail="Email already registered")
 
     user = User(client_id=tenant.id, name=body.name, email=body.email,
-                hashed_password=get_password_hash(body.password))
+                hashed_password=hash_password(body.password))
     db.add(user); db.commit(); db.refresh(user)
 
     for rname in body.role_names:
