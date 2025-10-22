@@ -52,7 +52,7 @@ except Exception:
 # 2) Se não houver, usa um fallback local com jose
 if _mk_access is None or _mk_refresh is None:
     from jose import jwt
-    from core.config import settings
+    from app.core.config import settings
 
     ALGO = getattr(settings, "ALGORITHM", "HS256")
     ACCESS_MIN = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 30))
