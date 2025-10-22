@@ -1,7 +1,7 @@
 # backend/core/tokens.py
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
-from core.config import settings
+from app.core.config import settings
 
 ALGO = getattr(settings, "ALGORITHM", "HS256")
 ACCESS_MIN = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 30))
