@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.client import Client
 from app.models.role import Role
 from app.models.user import User
-from app.core.security import get_password_hash
+from app.core.tokens import get_password_hash
 
 ROLE_NAMES = ["admin", "organizer", "gate", "student"]
 
