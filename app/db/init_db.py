@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.client import Client
 from app.models.role import Role
 from app.models.user import User
-from app.core.tokens import get_password_hash
+from app.core.security import hash_password
 
 ROLE_NAMES = ["admin", "organizer", "gate", "student"]
 
@@ -40,7 +40,7 @@ def init_db(db: Session) -> None:
             client_id=tenant.id,
             name="Admin Demo",
             email="admin@demo",
-            hashed_password=get_password_hash("admin123"),
+            hashed_password=hash_password("admin123"),
             status="active",
         )
         admin.roles.append(roles["admin"])
