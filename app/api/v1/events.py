@@ -59,72 +59,63 @@ class EventUpdate(BaseModel):
     class Config:
         from_attributes = True
 
-@router.put("/events/{event_id}")
+# substitua o SEU @router.put("/events/{event_id}") por este:
+@router.put("/{event_id}", response_model=Event, dependencies=[Depends(require_roles("admin","organizer"))])
 def update_event(
     event_id: int,
-    payload: Dict[str, Any] = Body(...),   # aceita JSON parcial: {"description": "..."} etc.
+    body: EventUpdate = Body(...),            # usa seu schema de update
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
+    _ = Depends(get_current_user_scoped),
 ):
-    # Carrega o evento do tenant atual
-    stmt = select(Event).where(
-        Event.id == event_id,
-        Event.client.has(slug=tenant.slug)    # <- multi-tenant pelo slug (estável)
-    )
-    event = db.execute(stmt).scalar_one_or_none()
-    if not event:
+    # carrega o evento e valida tenant
+    e = db.get(EventModel, event_id)
+    if not e or e.client_id != tenant.id:
         raise HTTPException(status_code=404, detail="Evento não encontrado")
 
-    # Campos que permitimos atualizar
-    ALLOWED_FIELDS = {
-        "name", "title",
-        "description", "location",
-        "starts_at", "ends_at", "start_date", "end_date",
-        "is_active", "capacity",
-    }
-
-    # Aplique somente os campos permitidos e existentes no modelo
+    # aplica apenas os campos enviados
+    data = body.model_dump(exclude_unset=True)
+    allowed = {"title","description","venue","capacity_total","workload_hours","min_presence_pct","start_at","end_at","status"}
     changed = False
-    for key, value in (payload or {}).items():
-        if key in ALLOWED_FIELDS and hasattr(event, key):
-            setattr(event, key, value)
+    for k, v in data.items():
+        if k in allowed and hasattr(e, k):
+            setattr(e, k, v)
             changed = True
 
     if not changed:
-        # Nada aplicável no corpo
         raise HTTPException(status_code=400, detail="Nenhum campo válido para atualização")
 
-    db.add(event)
+    db.add(e)
     db.commit()
-    db.refresh(event)
+    db.refresh(e)
 
-    # Retorne o próprio objeto (se houver schema de saída, pode usar response_model)
-    return {
-        "id": event.id,
-        "name": getattr(event, "name", None) or getattr(event, "title", None),
-        "description": getattr(event, "description", None),
-        "location": getattr(event, "location", None),
-        "starts_at": getattr(event, "starts_at", None) or getattr(event, "start_date", None),
-        "ends_at": getattr(event, "ends_at", None) or getattr(event, "end_date", None),
-        "is_active": getattr(event, "is_active", None),
-        "capacity": getattr(event, "capacity", None),
-        "client_id": getattr(event, "client_id", None),
-    }
+    return Event(
+        id=e.id,
+        client_id=e.client_id,
+        title=e.title,
+        description=e.description,
+        venue=e.venue,
+        capacity_total=e.capacity_total,
+        workload_hours=e.workload_hours,
+        min_presence_pct=e.min_presence_pct,
+        start_at=e.start_at,
+        end_at=e.end_at,
+        status=e.status,
+    )
 
-@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+# substitua o SEU @router.delete("/events/{event_id}", ...) por este:
+@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin","organizer"))])
 def delete_event(
     event_id: int,
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
+    _ = Depends(get_current_user_scoped),
 ):
-    stmt = select(Event).where(
-        Event.id == event_id,
-        Event.client.has(slug=tenant.slug)
-    )
-    event = db.execute(stmt).scalar_one_or_none()
-    if not event:
+    e = db.get(EventModel, event_id)
+    if not e or e.client_id != tenant.id:
         raise HTTPException(status_code=404, detail="Evento não encontrado")
 
-    db.delete(event)
+    db.delete(e)
     db.commit()
-    return None  # 204 No Content
+    return None  # 204
