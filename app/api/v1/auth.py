@@ -12,7 +12,6 @@ from app.schemas.user import UserCreate
 from app.models.user import User
 from app.models.role import Role
 from app.models.tokens import RefreshToken
-
 router = APIRouter()
 
 # --------------------------------------------------------------------
