@@ -19,4 +19,6 @@ uvicorn[standard]
 psycopg[binary]
 python-dotenv
 passlib
-argon2-cffi
+argon2-cffipasslib>=1.7.4
+argon2-cffi>=21.3.0
+bcrypt>=4.1.2
