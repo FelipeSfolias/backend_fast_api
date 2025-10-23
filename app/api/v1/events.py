@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from typing import List
+from typing import Any, Dict, List
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.rbac import require_roles
 from app.schemas.event import Event, EventCreate, EventUpdate
@@ -10,7 +10,7 @@ from app.crud.event import event_crud
 from app.crud.day_event import day_event_crud
 from app.models.event import Event as EventModel
 from app.models.day_event import DayEvent as DayModel
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path,Body, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -59,38 +59,72 @@ class EventUpdate(BaseModel):
     class Config:
         from_attributes = True
 
-@router.patch("/{event_id}")
+@router.put("/events/{event_id}")
 def update_event(
-    tenant = Depends(get_tenant),
-    event_id: int = Path(...),
-    payload: EventUpdate = ...,
+    event_id: int,
+    payload: Dict[str, Any] = Body(...),   # aceita JSON parcial: {"description": "..."} etc.
     db: Session = Depends(get_db),
-    _user = Depends(get_current_user_scoped),
+    tenant = Depends(get_tenant),
 ):
-    ev = db.get(Event, event_id)
-    if not ev or ev.client_id != tenant.id:
-        raise HTTPException(status_code=404, detail="Event not found")
-    data = payload.model_dump(exclude_unset=True)
-    for k, v in data.items():
-        setattr(ev, k, v)
-    db.add(ev)
-    db.commit()
-    db.refresh(ev)
-    return ev
+    # Carrega o evento do tenant atual
+    stmt = select(Event).where(
+        Event.id == event_id,
+        Event.client.has(slug=tenant.slug)    # <- multi-tenant pelo slug (estável)
+    )
+    event = db.execute(stmt).scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento não encontrado")
 
-@router.delete("/{event_id}/days/{day_id}", status_code=204)
-def delete_event_day(
-    tenant = Depends(get_tenant),
-    event_id: int = Path(...),
-    day_id: int = Path(...),
-    db: Session = Depends(get_db),
-    _user = Depends(get_current_user_scoped),
-):
-    day = db.get(DayEvent, day_id)
-    if not day or day.event_id != event_id:
-        raise HTTPException(status_code=404, detail="Day not found")
-    # Opcional: cheque se o evento é do tenant
-    # (mais seguro se você fizer join para confirmar client_id)
-    db.delete(day)
+    # Campos que permitimos atualizar
+    ALLOWED_FIELDS = {
+        "name", "title",
+        "description", "location",
+        "starts_at", "ends_at", "start_date", "end_date",
+        "is_active", "capacity",
+    }
+
+    # Aplique somente os campos permitidos e existentes no modelo
+    changed = False
+    for key, value in (payload or {}).items():
+        if key in ALLOWED_FIELDS and hasattr(event, key):
+            setattr(event, key, value)
+            changed = True
+
+    if not changed:
+        # Nada aplicável no corpo
+        raise HTTPException(status_code=400, detail="Nenhum campo válido para atualização")
+
+    db.add(event)
     db.commit()
-    return
+    db.refresh(event)
+
+    # Retorne o próprio objeto (se houver schema de saída, pode usar response_model)
+    return {
+        "id": event.id,
+        "name": getattr(event, "name", None) or getattr(event, "title", None),
+        "description": getattr(event, "description", None),
+        "location": getattr(event, "location", None),
+        "starts_at": getattr(event, "starts_at", None) or getattr(event, "start_date", None),
+        "ends_at": getattr(event, "ends_at", None) or getattr(event, "end_date", None),
+        "is_active": getattr(event, "is_active", None),
+        "capacity": getattr(event, "capacity", None),
+        "client_id": getattr(event, "client_id", None),
+    }
+
+@router.delete("/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+):
+    stmt = select(Event).where(
+        Event.id == event_id,
+        Event.client.has(slug=tenant.slug)
+    )
+    event = db.execute(stmt).scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento não encontrado")
+
+    db.delete(event)
+    db.commit()
+    return None  # 204 No Content
