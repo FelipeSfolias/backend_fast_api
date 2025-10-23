@@ -1,4 +1,3 @@
-# backend/core/tokens.py
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from app.core.config import settings
@@ -33,7 +32,6 @@ def decode_refresh(token: str):
     except JWTError:
         return None
 
-# app/core/tokens.py
 try:
     from .config import settings
 except Exception:
