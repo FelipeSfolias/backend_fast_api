@@ -4,18 +4,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
-
 from app.api.deps import get_db, get_tenant
-from app.core.tokens import (
-    create_access_token,
-    create_refresh_token,
-    decode_refresh,
-)
-from app.core.security_password import (
-    verify_and_maybe_upgrade,
-    hash_password,
-)
-
+from app.core.tokens import (create_access_token, create_refresh_token, decode_refresh)
+from app.core.security_password import (verify_and_maybe_upgrade,hash_password)
 from app.schemas.auth import TokenPair
 from app.schemas.user import UserCreate
 from app.models.user import User
