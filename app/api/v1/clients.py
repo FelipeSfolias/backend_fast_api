@@ -6,6 +6,10 @@ from app.schemas.client import Client as ClientOut, ClientUpdate
 from app.models.client import Client as ClientModel
 
 router = APIRouter()
+# app/api/v1/auth.py (trecho de criação)
+from app.core.security_password import hash_password
+# ...
+
 
 @router.get("/", response_model=ClientOut)
 def get_my_client(db: Session = Depends(get_db), tenant = Depends(get_tenant), _=Depends(get_current_user_scoped)):
