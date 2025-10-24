@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Tuple, Optional
 from urllib.parse import parse_qs
 
@@ -211,10 +211,22 @@ from fastapi import Body, Depends, HTTPException, Query
 # ... seus imports existentes ...
 # from app.models.tokens import RefreshToken
 
-def _build_refresh_row(jti: str, sub: str, tenant, scope: str = "") -> RefreshToken:
+from datetime import datetime, timezone
+
+def _build_refresh_row(
+    jti: str,
+    sub: str,
+    tenant,
+    scope: str,
+    refresh_payload: dict,  # payload decodificado do NOVO refresh (tem exp/iat/jti)
+) -> RefreshToken:
     """
     Cria uma instância de RefreshToken preenchendo campos que existirem no modelo.
-    Evita NOT NULL em colunas como user_email, tenant_slug, client_id etc.
+    - user_email / user_id
+    - tenant_slug / tenant / client_id
+    - scope
+    - issued_at / expires_at (a partir do payload JWT)
+    - revoked_at = None
     """
     rt = RefreshToken(jti=jti)
 
@@ -224,7 +236,7 @@ def _build_refresh_row(jti: str, sub: str, tenant, scope: str = "") -> RefreshTo
     if hasattr(rt, "user_id") and sub.isdigit():
         rt.user_id = int(sub)
 
-    # Tenant (slug e id)
+    # Tenant (nomes possíveis)
     if hasattr(rt, "tenant_slug"):
         rt.tenant_slug = getattr(tenant, "slug", None)
     if hasattr(rt, "tenant"):
@@ -232,11 +244,34 @@ def _build_refresh_row(jti: str, sub: str, tenant, scope: str = "") -> RefreshTo
     if hasattr(rt, "client_id"):
         rt.client_id = getattr(tenant, "id", None)
 
-    # Escopo e datas
+    # Escopo
     if hasattr(rt, "scope"):
         rt.scope = scope
-    if hasattr(rt, "issued_at"):
-        rt.issued_at = datetime.utcnow()
+
+    # Datas do JWT (iat/exp vêm em epoch segundos)
+    iat_epoch = refresh_payload.get("iat")
+    exp_epoch = refresh_payload.get("exp")
+
+    issued_dt = None
+    expires_dt = None
+    if isinstance(iat_epoch, (int, float)):
+        issued_dt = datetime.fromtimestamp(iat_epoch, tz=timezone.utc)
+    if isinstance(exp_epoch, (int, float)):
+        expires_dt = datetime.fromtimestamp(exp_epoch, tz=timezone.utc)
+
+    if hasattr(rt, "issued_at") and issued_dt is not None:
+        rt.issued_at = issued_dt
+    elif hasattr(rt, "issued_at") and issued_dt is None:
+        # fallback: agora
+        rt.issued_at = datetime.now(timezone.utc)
+
+    if hasattr(rt, "expires_at") and expires_dt is not None:
+        rt.expires_at = expires_dt
+    elif hasattr(rt, "expires_at") and expires_dt is None:
+        # fallback: agora + 30 dias (ou ajuste se seu settings for outro)
+        rt.expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+
+    # Revogação padrão
     if hasattr(rt, "revoked_at"):
         rt.revoked_at = None
 
@@ -284,9 +319,16 @@ def refresh(
     if not new_jti:
         raise HTTPException(status_code=500, detail="Failed to issue refresh token")
 
-    new_row = _build_refresh_row(jti=new_jti, sub=sub, tenant=tenant, scope=scope)
+    new_row = _build_refresh_row(
+        jti=new_jti,
+        sub=sub,
+        tenant=tenant,
+        scope=scope,
+        refresh_payload=new_payload,  # <- agora passamos o payload p/ preencher iat/exp
+    )
     db.add(new_row)
     db.commit()
+
 
     return TokenPair(access_token=new_access, refresh_token=new_refresh, token_type="bearer")
 
