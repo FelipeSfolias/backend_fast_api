@@ -214,24 +214,32 @@ from fastapi import Body, Depends, HTTPException, Query
 def _build_refresh_row(jti: str, sub: str, tenant, scope: str = "") -> RefreshToken:
     """
     Cria uma instância de RefreshToken preenchendo campos que existirem no modelo.
-    Evita NOT NULL em colunas como user_email/tenant/issued_at/etc.
+    Evita NOT NULL em colunas como user_email, tenant_slug, client_id etc.
     """
     rt = RefreshToken(jti=jti)
 
-    # Campos comuns que podem existir no modelo:
+    # Identificação do usuário
     if hasattr(rt, "user_email"):
-        rt.user_email = sub                 # sub costuma ser email; se for id, ajuste aqui
+        rt.user_email = sub
     if hasattr(rt, "user_id") and sub.isdigit():
         rt.user_id = int(sub)
+
+    # Tenant (slug e id)
+    if hasattr(rt, "tenant_slug"):
+        rt.tenant_slug = getattr(tenant, "slug", None)
     if hasattr(rt, "tenant"):
         rt.tenant = getattr(tenant, "slug", None)
     if hasattr(rt, "client_id"):
         rt.client_id = getattr(tenant, "id", None)
+
+    # Escopo e datas
     if hasattr(rt, "scope"):
         rt.scope = scope
     if hasattr(rt, "issued_at"):
         rt.issued_at = datetime.utcnow()
-    # revoked_at fica None por padrão
+    if hasattr(rt, "revoked_at"):
+        rt.revoked_at = None
+
     return rt
 
 
