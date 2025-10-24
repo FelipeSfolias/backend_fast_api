@@ -205,6 +205,36 @@ from fastapi import Body, Depends, HTTPException, Query
 # from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
 # from app.models.tokens import RefreshToken
 
+from datetime import datetime
+from sqlalchemy import select
+from fastapi import Body, Depends, HTTPException, Query
+# ... seus imports existentes ...
+# from app.models.tokens import RefreshToken
+
+def _build_refresh_row(jti: str, sub: str, tenant, scope: str = "") -> RefreshToken:
+    """
+    Cria uma instância de RefreshToken preenchendo campos que existirem no modelo.
+    Evita NOT NULL em colunas como user_email/tenant/issued_at/etc.
+    """
+    rt = RefreshToken(jti=jti)
+
+    # Campos comuns que podem existir no modelo:
+    if hasattr(rt, "user_email"):
+        rt.user_email = sub                 # sub costuma ser email; se for id, ajuste aqui
+    if hasattr(rt, "user_id") and sub.isdigit():
+        rt.user_id = int(sub)
+    if hasattr(rt, "tenant"):
+        rt.tenant = getattr(tenant, "slug", None)
+    if hasattr(rt, "client_id"):
+        rt.client_id = getattr(tenant, "id", None)
+    if hasattr(rt, "scope"):
+        rt.scope = scope
+    if hasattr(rt, "issued_at"):
+        rt.issued_at = datetime.utcnow()
+    # revoked_at fica None por padrão
+    return rt
+
+
 @router.post("/refresh", response_model=TokenPair)
 def refresh(
     token: str | None = Body(default=None, embed=True),        # {"token":"<refresh>"}
@@ -222,7 +252,7 @@ def refresh(
     if not old_jti:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    # reuso/rotação
+    # 1) Verifica reuso e revoga o refresh atual (se existir)
     rt = db.execute(
         select(RefreshToken).where(RefreshToken.jti == old_jti)
     ).scalar_one_or_none()
@@ -233,16 +263,21 @@ def refresh(
         rt.revoked_at = datetime.utcnow()
         db.add(rt)
 
+    # 2) Emite novo par (access + refresh)
     sub = payload.get("sub")
     scope = payload.get("scope", "")
 
     new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
     new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
+    # 3) Persiste o novo refresh com todos os campos necessários do modelo
     new_payload = decode_refresh(new_refresh)
     new_jti = new_payload.get("jti") if new_payload else None
-    if new_jti:
-        db.add(RefreshToken(jti=new_jti))
+    if not new_jti:
+        raise HTTPException(status_code=500, detail="Failed to issue refresh token")
+
+    new_row = _build_refresh_row(jti=new_jti, sub=sub, tenant=tenant, scope=scope)
+    db.add(new_row)
     db.commit()
 
     return TokenPair(access_token=new_access, refresh_token=new_refresh, token_type="bearer")
