@@ -83,3 +83,22 @@ def decode_refresh(token: str) -> Optional[Dict[str, Any]]:
     if not payload.get("sub") or not payload.get("tenant") or not payload.get("jti"):
         return None
     return payload
+
+def decode_access(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Decodifica um access token e retorna o payload se for válido e do tipo 'access'.
+    Caso contrário, retorna None.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGO])
+    except JWTError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "access":
+        return None
+    if not payload.get("sub") or not payload.get("tenant"):
+        return None
+    return payload
+

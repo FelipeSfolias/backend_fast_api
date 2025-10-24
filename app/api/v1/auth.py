@@ -248,8 +248,6 @@ def refresh(
     return TokenPair(access_token=new_access, refresh_token=new_refresh, token_type="bearer")
 
 
-
-
 @router.post("/logout")
 def logout(
     token: str | None = Body(default=None, embed=True),
