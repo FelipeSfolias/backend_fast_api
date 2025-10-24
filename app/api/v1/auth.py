@@ -207,58 +207,46 @@ from fastapi import Body, Depends, HTTPException, Query
 
 @router.post("/refresh", response_model=TokenPair)
 def refresh(
-    token: str | None = Body(default=None, embed=True),        # aceita {"token":"..."}
-    token_q: str | None = Query(default=None, alias="token"),  # aceita ?token=...
+    token: str | None = Body(default=None, embed=True),        # {"token":"<refresh>"}
+    token_q: str | None = Query(default=None, alias="token"),  # ?token=<refresh>
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
 ):
-    # 1) recuperar token do corpo ou query
     tok = _get_token_from_body_or_query(token, token_q)
 
-    # 2) decodificar e validar tenant
     payload = decode_refresh(tok)
     if not payload or payload.get("tenant") != tenant.slug:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    # 3) checar JTI (id único do refresh)
     old_jti = payload.get("jti")
     if not old_jti:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    # 4) verificar se esse refresh já foi revogado (reuso)
+    # reuso/rotação
     rt = db.execute(
         select(RefreshToken).where(RefreshToken.jti == old_jti)
     ).scalar_one_or_none()
     if rt and rt.revoked_at is not None:
-        # Tentativa de reuso de refresh já revogado
         raise HTTPException(status_code=401, detail="Refresh token revoked")
 
-    # 5) revogar o refresh atual
     if rt:
         rt.revoked_at = datetime.utcnow()
         db.add(rt)
 
-    # 6) emitir novo par (access + refresh)
     sub = payload.get("sub")
     scope = payload.get("scope", "")
 
     new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
     new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
-    # 7) registrar o novo refresh (salva jti para futura revogação)
     new_payload = decode_refresh(new_refresh)
     new_jti = new_payload.get("jti") if new_payload else None
     if new_jti:
-        try:
-            # Se seu modelo tiver só 'jti' e 'revoked_at', isso basta:
-            db.add(RefreshToken(jti=new_jti))
-        except TypeError:
-            # Caso seu modelo tenha campos extras obrigatórios, ajuste aqui:
-            # Exemplo: db.add(RefreshToken(jti=new_jti, user_sub=sub, tenant=tenant.slug, created_at=datetime.utcnow()))
-            db.add(RefreshToken(jti=new_jti))
+        db.add(RefreshToken(jti=new_jti))
     db.commit()
 
     return TokenPair(access_token=new_access, refresh_token=new_refresh, token_type="bearer")
+
 
 
 
