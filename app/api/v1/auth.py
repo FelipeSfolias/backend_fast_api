@@ -3,22 +3,22 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Tuple, Optional
+from typing import Tuple
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from pydantic import BaseModel, EmailStr
 
 from app.api.deps import get_db, get_tenant
-from app.core.tokens import (create_access_token, create_refresh_token, decode_refresh)
-from app.core.security_password import (verify_and_maybe_upgrade, hash_password)
-from app.schemas.auth import TokenPair  # LoginRequest existe, mas o /login não tipa mais o body
-from app.schemas.user import UserCreate
+from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
+from app.core.security_password import verify_and_maybe_upgrade, hash_password
+
 from app.models.user import User
 from app.models.role import Role
-from app.models.tokens import RefreshToken
+from app.models.tokens import RefreshToken  # ok mesmo se você não persistir refresh
 
 router = APIRouter()
 
@@ -33,14 +33,13 @@ def ensure_password_policy(password: str) -> None:
     if not isinstance(password, str) or len(password) < 8 or len(password) > 128:
         raise HTTPException(status_code=400, detail="Senha fora do padrão (8–128).")
 
-def issue_tokens_for(user: User, tenant, scope: str = "") -> TokenPair:
-    # Mantém compat: sub = email (se o restante do código espera isso)
+def issue_tokens_for(user: User, tenant, scope: str = "") -> dict:
     sub = user.email
-    return TokenPair(
-        access_token=create_access_token(sub=sub, tenant=tenant.slug, scope=scope),
-        refresh_token=create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope),
-        token_type="bearer",
-    )
+    return {
+        "access_token": create_access_token(sub=sub, tenant=tenant.slug, scope=scope),
+        "refresh_token": create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope),
+        "token_type": "bearer",
+    }
 
 def _get_token_from_body_or_query(token_body: str | None, token_query: str | None) -> str:
     tok = token_body or token_query
@@ -52,9 +51,9 @@ def _get_token_from_body_or_query(token_body: str | None, token_query: str | Non
     return tok
 
 # nomes possíveis no modelo de usuário
-_PASSWORD_FIELDS = ["hashed_password", "password_hash", "password"]
+_PASSWORD_FIELDS = ["password_hash", "hashed_password", "password"]
 
-def _read_password_field(user: User) -> Tuple[str, str | None]:
+def _read_password_field(user: User) -> tuple[str, str | None]:
     for f in _PASSWORD_FIELDS:
         if hasattr(user, f):
             return f, getattr(user, f)
@@ -68,7 +67,7 @@ async def _extract_credentials_from_request(request: Request) -> Tuple[str, str]
     Extrai (email, password) aceitando:
       - JSON: {"username": "...", "password": "..."}
       - application/x-www-form-urlencoded
-      - raw "username=...&password=..." (mesmo com Content-Type incorreto)
+      - body cru "username=...&password=..." (mesmo com Content-Type incorreto)
     """
     ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
 
@@ -95,7 +94,7 @@ async def _extract_credentials_from_request(request: Request) -> Tuple[str, str]
         except Exception:
             pass
 
-    # 2b) querystring bruta
+    # 2b) querystring crua
     if text:
         parsed = parse_qs(text, keep_blank_values=True)
         if parsed:
@@ -113,7 +112,7 @@ async def _extract_credentials_from_request(request: Request) -> Tuple[str, str]
 # Endpoints
 # --------------------------------------------------------------------
 
-@router.post("/login", response_model=TokenPair)
+@router.post("/login")
 async def login(
     request: Request,
     db: Session = Depends(get_db),
@@ -122,11 +121,11 @@ async def login(
     email, password = await _extract_credentials_from_request(request)
     ensure_password_policy(password)
 
-    # >>> IMPORTANTÍSSIMO: filtra por RELAÇÃO usando slug (evita mismatch de ids)
+    # garanta escopo por tenant via relação
     user = db.execute(
         select(User).where(
             User.email == email,
-            User.client.has(slug=tenant.slug)  # <-- mudança principal
+            User.client.has(slug=tenant.slug)  # evita mismatch de client_id
         )
     ).scalar_one_or_none()
     if not user:
@@ -154,7 +153,7 @@ async def login(
     return issue_tokens_for(user, tenant)
 
 
-@router.post("/token", response_model=TokenPair)
+@router.post("/token")
 def login_oauth2_form(
     form: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
@@ -169,7 +168,7 @@ def login_oauth2_form(
     user = db.execute(
         select(User).where(
             User.email == email,
-            User.client.has(slug=tenant.slug)  # <-- mudança principal
+            User.client.has(slug=tenant.slug)
         )
     ).scalar_one_or_none()
     if not user:
@@ -197,88 +196,7 @@ def login_oauth2_form(
     return issue_tokens_for(user, tenant)
 
 
-from datetime import datetime
-from sqlalchemy import select
-from fastapi import Body, Depends, HTTPException, Query
-
-# ... (demais imports do arquivo)
-# from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
-# from app.models.tokens import RefreshToken
-
-from datetime import datetime
-from sqlalchemy import select
-from fastapi import Body, Depends, HTTPException, Query
-# ... seus imports existentes ...
-# from app.models.tokens import RefreshToken
-
-from datetime import datetime, timezone
-
-def _build_refresh_row(
-    jti: str,
-    sub: str,
-    tenant,
-    scope: str,
-    refresh_payload: dict,  # payload decodificado do NOVO refresh (tem exp/iat/jti)
-) -> RefreshToken:
-    """
-    Cria uma instância de RefreshToken preenchendo campos que existirem no modelo.
-    - user_email / user_id
-    - tenant_slug / tenant / client_id
-    - scope
-    - issued_at / expires_at (a partir do payload JWT)
-    - revoked_at = None
-    """
-    rt = RefreshToken(jti=jti)
-
-    # Identificação do usuário
-    if hasattr(rt, "user_email"):
-        rt.user_email = sub
-    if hasattr(rt, "user_id") and sub.isdigit():
-        rt.user_id = int(sub)
-
-    # Tenant (nomes possíveis)
-    if hasattr(rt, "tenant_slug"):
-        rt.tenant_slug = getattr(tenant, "slug", None)
-    if hasattr(rt, "tenant"):
-        rt.tenant = getattr(tenant, "slug", None)
-    if hasattr(rt, "client_id"):
-        rt.client_id = getattr(tenant, "id", None)
-
-    # Escopo
-    if hasattr(rt, "scope"):
-        rt.scope = scope
-
-    # Datas do JWT (iat/exp vêm em epoch segundos)
-    iat_epoch = refresh_payload.get("iat")
-    exp_epoch = refresh_payload.get("exp")
-
-    issued_dt = None
-    expires_dt = None
-    if isinstance(iat_epoch, (int, float)):
-        issued_dt = datetime.fromtimestamp(iat_epoch, tz=timezone.utc)
-    if isinstance(exp_epoch, (int, float)):
-        expires_dt = datetime.fromtimestamp(exp_epoch, tz=timezone.utc)
-
-    if hasattr(rt, "issued_at") and issued_dt is not None:
-        rt.issued_at = issued_dt
-    elif hasattr(rt, "issued_at") and issued_dt is None:
-        # fallback: agora
-        rt.issued_at = datetime.now(timezone.utc)
-
-    if hasattr(rt, "expires_at") and expires_dt is not None:
-        rt.expires_at = expires_dt
-    elif hasattr(rt, "expires_at") and expires_dt is None:
-        # fallback: agora + 30 dias (ou ajuste se seu settings for outro)
-        rt.expires_at = datetime.now(timezone.utc) + timedelta(days=30)
-
-    # Revogação padrão
-    if hasattr(rt, "revoked_at"):
-        rt.revoked_at = None
-
-    return rt
-
-
-@router.post("/refresh", response_model=TokenPair)
+@router.post("/refresh")
 def refresh(
     token: str | None = Body(default=None, embed=True),        # {"token":"<refresh>"}
     token_q: str | None = Query(default=None, alias="token"),  # ?token=<refresh>
@@ -288,49 +206,47 @@ def refresh(
     tok = _get_token_from_body_or_query(token, token_q)
 
     payload = decode_refresh(tok)
-    if not payload or payload.get("tenant") != tenant.slug:
+    if not payload or payload.get("tenant") != tenant.slug or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    old_jti = payload.get("jti")
-    if not old_jti:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    # 1) Verifica reuso e revoga o refresh atual (se existir)
-    rt = db.execute(
-        select(RefreshToken).where(RefreshToken.jti == old_jti)
-    ).scalar_one_or_none()
-    if rt and rt.revoked_at is not None:
-        raise HTTPException(status_code=401, detail="Refresh token revoked")
-
-    if rt:
-        rt.revoked_at = datetime.utcnow()
-        db.add(rt)
-
-    # 2) Emite novo par (access + refresh)
     sub = payload.get("sub")
     scope = payload.get("scope", "")
 
     new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
     new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
-    # 3) Persiste o novo refresh com todos os campos necessários do modelo
-    new_payload = decode_refresh(new_refresh)
-    new_jti = new_payload.get("jti") if new_payload else None
-    if not new_jti:
-        raise HTTPException(status_code=500, detail="Failed to issue refresh token")
+    # Opcional: registrar/revogar refresh se seu modelo tiver jti
+    try:
+        if hasattr(RefreshToken, "jti"):
+            old_jti = payload.get("jti")
+            if old_jti:
+                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == old_jti)).scalar_one_or_none()
+                if rt and getattr(rt, "revoked_at", None) is None:
+                    rt.revoked_at = datetime.utcnow()
+                    db.add(rt)
 
-    new_row = _build_refresh_row(
-        jti=new_jti,
-        sub=sub,
-        tenant=tenant,
-        scope=scope,
-        refresh_payload=new_payload,  # <- agora passamos o payload p/ preencher iat/exp
-    )
-    db.add(new_row)
-    db.commit()
+            new_payload = decode_refresh(new_refresh)
+            if new_payload and new_payload.get("jti"):
+                row = RefreshToken(jti=new_payload["jti"])
+                if hasattr(row, "tenant_slug"):
+                    row.tenant_slug = tenant.slug
+                if hasattr(row, "client_id"):
+                    row.client_id = getattr(tenant, "id", None)
+                if hasattr(row, "user_email"):
+                    row.user_email = sub
+                if hasattr(row, "scope"):
+                    row.scope = scope
+                if hasattr(row, "issued_at") and "iat" in new_payload:
+                    row.issued_at = datetime.fromtimestamp(new_payload["iat"], tz=timezone.utc)
+                if hasattr(row, "expires_at") and "exp" in new_payload:
+                    row.expires_at = datetime.fromtimestamp(new_payload["exp"], tz=timezone.utc)
+                db.add(row)
+            db.commit()
+    except Exception:
+        # não derruba o refresh se persistência falhar
+        pass
 
-
-    return TokenPair(access_token=new_access, refresh_token=new_refresh, token_type="bearer")
+    return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
 
 
 @router.post("/logout")
@@ -342,18 +258,27 @@ def logout(
 ):
     tok = _get_token_from_body_or_query(token, token_q)
     payload = decode_refresh(tok)
-    if payload and payload.get("tenant") == tenant.slug and "jti" in payload:
+    if payload and payload.get("tenant") == tenant.slug and hasattr(RefreshToken, "jti") and "jti" in payload:
         rt = db.execute(select(RefreshToken).where(RefreshToken.jti == payload["jti"])).scalar_one_or_none()
-        if rt and rt.revoked_at is None:
+        if rt and getattr(rt, "revoked_at", None) is None:
             rt.revoked_at = datetime.utcnow()
             db.add(rt)
             db.commit()
     return {"ok": True}
 
 
+# -----------------------------
+# Signup (criar usuário)
+# -----------------------------
+class UserCreateIn(BaseModel):
+    name: str | None = None
+    email: EmailStr
+    password: str
+    role_names: list[str] | None = None
+
 @router.post("/signup")
 def signup(
-    body: UserCreate,
+    body: UserCreateIn,
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
 ):
@@ -361,14 +286,16 @@ def signup(
     ensure_password_policy(body.password)
 
     # único por tenant (via relação pelo slug)
-    if db.execute(
+    exists = db.execute(
         select(User).where(
             User.email == email,
-            User.client.has(slug=tenant.slug)  # <-- mudança principal
+            User.client.has(slug=tenant.slug)
         )
-    ).scalar_one_or_none():
+    ).scalar_one_or_none()
+    if exists:
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # escolhe dinamicamente o campo de senha
     password_field = None
     for f in _PASSWORD_FIELDS:
         if hasattr(User, f):
@@ -377,21 +304,23 @@ def signup(
     if not password_field:
         raise HTTPException(status_code=500, detail="User model missing password field")
 
-    # vincula ao tenant atual
     user = User(
         email=email,
-        name=getattr(body, "name", None),
+        name=body.name,
     )
-    # se seu modelo exige client_id explicitamente, defina:
-    # user.client_id = db.execute(select(Client.id).where(Client.slug == tenant.slug)).scalar_one()
+    # vincula ao tenant atual (por id ou relação)
+    if hasattr(User, "client_id"):
+        setattr(user, "client_id", getattr(tenant, "id", None))
+    elif hasattr(user, "client"):
+        setattr(user, "client", tenant)
+
     setattr(user, password_field, hash_password(body.password))
 
     db.add(user)
     db.commit()
     db.refresh(user)
 
-    # atribui roles se enviados
-    for rname in getattr(body, "role_names", []) or []:
+    for rname in (body.role_names or []):
         role = db.execute(select(Role).where(Role.name == rname)).scalar_one_or_none()
         if role and hasattr(user, "roles"):
             user.roles.append(role)
