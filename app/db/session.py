@@ -17,3 +17,14 @@ SQLALCHEMY_DATABASE_URL = _normalize(RAW)
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+from typing import Generator
+from sqlalchemy.orm import Session
+from app.db.session import SessionLocal  # precisa existir no session.py
+
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

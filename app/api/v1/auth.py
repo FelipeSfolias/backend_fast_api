@@ -5,12 +5,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from urllib.parse import parse_qs
-
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-
 from app.api.deps import get_db, get_tenant
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
 from app.core.security_password import verify_and_maybe_upgrade, hash_password

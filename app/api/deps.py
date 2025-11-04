@@ -7,7 +7,7 @@ from app.core.tenancy import resolve_tenant
 from app.models.user import User
 from app.models.role import Role
 from app.core.tokens import decode_access
-
+from app.db.session import get_db
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")  # a URL final inclui /{tenant}/auth/login
 
 def get_db():
