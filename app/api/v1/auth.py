@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from pydantic import BaseModel, EmailStr
 
 from app.api.deps import get_db, get_tenant
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
@@ -18,13 +17,11 @@ from app.core.security_password import verify_and_maybe_upgrade, hash_password
 
 from app.models.user import User
 from app.models.role import Role
-from app.models.tokens import RefreshToken  # ok mesmo se você não persistir refresh
+from app.models.tokens import RefreshToken
 
 router = APIRouter()
 
-# --------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------
+# --------------------- Helpers ---------------------
 
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
@@ -50,7 +47,6 @@ def _get_token_from_body_or_query(token_body: str | None, token_query: str | Non
         )
     return tok
 
-# nomes possíveis no modelo de usuário
 _PASSWORD_FIELDS = ["password_hash", "hashed_password", "password"]
 
 def _read_password_field(user: User) -> tuple[str, str | None]:
@@ -67,7 +63,7 @@ async def _extract_credentials_from_request(request: Request) -> Tuple[str, str]
     Extrai (email, password) aceitando:
       - JSON: {"username": "...", "password": "..."}
       - application/x-www-form-urlencoded
-      - body cru "username=...&password=..." (mesmo com Content-Type incorreto)
+      - body cru "username=...&password=..."
     """
     ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
 
@@ -108,9 +104,7 @@ async def _extract_credentials_from_request(request: Request) -> Tuple[str, str]
         detail=[{"loc": ["body"], "msg": "Esperado JSON {username,password}, form-url-encoded ou raw 'username=...&password=...'", "type": "value_error"}],
     )
 
-# --------------------------------------------------------------------
-# Endpoints
-# --------------------------------------------------------------------
+# --------------------- Endpoints ---------------------
 
 @router.post("/login")
 async def login(
@@ -121,11 +115,10 @@ async def login(
     email, password = await _extract_credentials_from_request(request)
     ensure_password_policy(password)
 
-    # garanta escopo por tenant via relação
     user = db.execute(
         select(User).where(
             User.email == email,
-            User.client.has(slug=tenant.slug)  # evita mismatch de client_id
+            User.client.has(slug=tenant.slug)
         )
     ).scalar_one_or_none()
     if not user:
@@ -204,7 +197,6 @@ def refresh(
     tenant = Depends(get_tenant),
 ):
     tok = _get_token_from_body_or_query(token, token_q)
-
     payload = decode_refresh(tok)
     if not payload or payload.get("tenant") != tenant.slug or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -215,7 +207,7 @@ def refresh(
     new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
     new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
-    # Opcional: registrar/revogar refresh se seu modelo tiver jti
+    # opcional: registrar/revogar refresh se houver 'jti'
     try:
         if hasattr(RefreshToken, "jti"):
             old_jti = payload.get("jti")
@@ -243,7 +235,6 @@ def refresh(
                 db.add(row)
             db.commit()
     except Exception:
-        # não derruba o refresh se persistência falhar
         pass
 
     return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
@@ -267,9 +258,10 @@ def logout(
     return {"ok": True}
 
 
-# -----------------------------
-# Signup (criar usuário)
-# -----------------------------
+# ---------------------- Signup ----------------------
+
+from pydantic import BaseModel, EmailStr
+
 class UserCreateIn(BaseModel):
     name: str | None = None
     email: EmailStr
@@ -285,7 +277,6 @@ def signup(
     email = normalize_email(body.email)
     ensure_password_policy(body.password)
 
-    # único por tenant (via relação pelo slug)
     exists = db.execute(
         select(User).where(
             User.email == email,
@@ -295,7 +286,7 @@ def signup(
     if exists:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    # escolhe dinamicamente o campo de senha
+    # decide dinamicamente o campo de senha
     password_field = None
     for f in _PASSWORD_FIELDS:
         if hasattr(User, f):
@@ -304,11 +295,7 @@ def signup(
     if not password_field:
         raise HTTPException(status_code=500, detail="User model missing password field")
 
-    user = User(
-        email=email,
-        name=body.name,
-    )
-    # vincula ao tenant atual (por id ou relação)
+    user = User(email=email, name=body.name)
     if hasattr(User, "client_id"):
         setattr(user, "client_id", getattr(tenant, "id", None))
     elif hasattr(user, "client"):
