@@ -1,23 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from secrets import token_hex
-from typing import List
-from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.core.rbac import require_roles
-from app.crud.enrollment import enrollment_crud
-from app.schemas.enrollment import Enrollment, EnrollmentStatus
-from app.models.student import Student
-from app.models.event import Event
-from app.models.enrollment import Enrollment as Enr
-from sqlalchemy import select
-from app.models.enrollment import Enrollment as Enr, EnrollmentStatus
-from starlette.status import HTTP_409_CONFLICT
-from fastapi import Query
-
-router = APIRouter()
-# app/api/v1/enrollments.py
-from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
@@ -27,96 +8,156 @@ from app.models.event import Event
 
 router = APIRouter()
 
-@router.post("/events/{event_id}/enroll",status_code=201,
-             dependencies=[Depends(require_roles("admin","organizer"))])
-def enroll(event_id: int, student_id: int, idempotent: bool = Query(False),
-           db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
-    s = db.get(Student, student_id); e = db.get(Event, event_id)
-    if not s or s.client_id != tenant.id or not e or e.client_id != tenant.id:
-        raise HTTPException(404)
-    dup = db.execute(select(Enr).where(Enr.student_id==s.id, Enr.event_id==e.id)).scalar_one_or_none()
-    if dup:
-        if idempotent:
-            return Enrollment(id=dup.id, student_id=dup.student_id, event_id=dup.event_id, status=dup.status)
-        raise HTTPException(status_code=HTTP_409_CONFLICT,
-                            detail={"code":"ENROLLMENT_EXISTS","message":"Aluno já inscrito neste evento.","details":{"enrollment_id":dup.id}})
-    enr = enrollment_crud.enroll(db, student_id=s.id, event_id=e.id, qr_seed=token_hex(16))
-    return Enrollment(id=enr.id, student_id=s.id, event_id=e.id, status=enr.status)
+STATUS_CANCELED = {"canceled", "cancelled"}  # tolerar os dois
+STATUS_PENDING = "pending"
+STATUS_CONFIRMED = "confirmed"
 
-@router.get("", summary="List Enrollments (supports expand=student,event)")
-def list_enrollments(
-    tenant = Depends(get_tenant),
+def _bool_param(val: str | bool | None) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() in {"1","true","t","yes","y","on"}
+    return False
+
+def _enr_out(enr: Enrollment) -> dict:
+    return {
+        "id": enr.id,
+        "student_id": enr.student_id,
+        "event_id": enr.event_id,
+        "status": enr.status,
+    }
+
+@router.post("/events/{event_id}/enroll", status_code=201, summary="Enroll student into event")
+def enroll_student(
+    event_id: int,
+    student_id: int = Query(..., alias="student_id"),
+    idempotent: str | bool | None = Query(False, alias="idempotent"),
+    reactivate_if_canceled: str | bool | None = Query(True, alias="reactivate_if_canceled"),
     db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
     _user = Depends(get_current_user_scoped),
+):
+    idem = _bool_param(idempotent)
+    reactivate = _bool_param(reactivate_if_canceled)
+
+    # 1) Escopo por tenant: garanta que EVENTO e ALUNO pertencem ao tenant
+    ev = db.execute(
+        select(Event).where(Event.id == event_id, Event.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="event_not_found")
+
+    st = db.execute(
+        select(Student).where(Student.id == student_id, Student.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not st:
+        raise HTTPException(status_code=404, detail="student_not_found")
+
+    # 2) Procure matrícula existente (qualquer status)
+    existing = db.execute(
+        select(Enrollment).where(
+            Enrollment.event_id == event_id,
+            Enrollment.student_id == student_id,
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        # 2a) Idempotência real: devolva a existente sem alterar
+        if idem:
+            return _enr_out(existing)
+
+        # 2b) Se estava cancelada e permitimos reativar -> volta pra pending
+        if existing.status in STATUS_CANCELED and reactivate:
+            existing.status = STATUS_PENDING
+            db.add(existing); db.commit(); db.refresh(existing)
+            return _enr_out(existing)
+
+        # 2c) Já existe ativa → 409
+        if existing.status not in STATUS_CANCELED:
+            raise HTTPException(status_code=409, detail="already_enrolled")
+
+        # 2d) Estava cancelada e reativação não permitida → 409
+        raise HTTPException(status_code=409, detail="enrollment_canceled")
+
+    # 3) Criar nova matrícula como 'pending' por padrão
+    enr = Enrollment(student_id=student_id, event_id=event_id, status=STATUS_PENDING)
+    db.add(enr); db.commit(); db.refresh(enr)
+    return _enr_out(enr)
+
+
+# (opcional) cancelar matrícula explicitamente
+@router.post("/enrollments/{enr_id}/cancel", summary="Cancel enrollment")
+def cancel_enrollment(
+    enr_id: int,
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    enr = db.execute(
+        select(Enrollment)
+        .join(Event, Enrollment.event_id == Event.id)
+        .where(Enrollment.id == enr_id, Event.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not enr:
+        raise HTTPException(status_code=404, detail="enrollment_not_found")
+    enr.status = "canceled"  # padronize num dos dois
+    db.add(enr); db.commit(); db.refresh(enr)
+    return _enr_out(enr)
+
+
+# LISTAGEM com expand (student,event) — você pode chamar por event_id
+@router.get("/enrollments", summary="List Enrollments (supports expand=student,event)")
+def list_enrollments(
     event_id: int | None = Query(None, alias="event_id"),
-    status: str | None = Query(None, alias="status"),  # ex.: pending/confirmed/canceled
+    status: str | None = Query(None, alias="status"),
     expand: str = Query("", description="Comma-separated: student,event"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
 ):
     expand_set = {p.strip() for p in expand.split(",") if p.strip()}
-    # Preferimos filtrar por evento (que tem client_id). Se não houver, filtramos por Student->client_id.
-    stmt = select(Enrollment)
-
-    # Eager load se pedido
-    load_opts = []
-    if "student" in expand_set:
-        load_opts.append(joinedload(Enrollment.student))
-    if "event" in expand_set:
-        load_opts.append(joinedload(Enrollment.event))
-    if load_opts:
-        stmt = stmt.options(*load_opts)
+    stmt = select(Enrollment).join(Event, Enrollment.event_id == Event.id).where(Event.client_id == tenant.id)
 
     if event_id is not None:
-        stmt = stmt.join(Event, Enrollment.event_id == Event.id).where(Event.client_id == tenant.id, Enrollment.event_id == event_id)
-    else:
-        # Sem event_id: garanta escopo por tenant via Student (ou Event)
-        stmt = stmt.join(Student, Enrollment.student_id == Student.id).where(Student.client_id == tenant.id)
-
+        stmt = stmt.where(Enrollment.event_id == event_id)
     if status:
         stmt = stmt.where(Enrollment.status == status)
+
+    # eager loads
+    opts = []
+    if "student" in expand_set:
+        opts.append(joinedload(Enrollment.student))
+    if "event" in expand_set:
+        opts.append(joinedload(Enrollment.event))
+    if opts:
+        stmt = stmt.options(*opts)
 
     rows = db.execute(stmt).scalars().all()
 
     out = []
     for enr in rows:
-        item = {
-            "id": enr.id,
-            "student_id": enr.student_id,
-            "event_id": enr.event_id,
-            "status": enr.status,
-        }
-        if "student" in expand_set:
-            st = getattr(enr, "student", None)
-            if st:
-                item["student"] = {
-                    "id": st.id,
-                    "name": getattr(st, "name", None),
-                    "email": getattr(st, "email", None),
-                    "cpf": getattr(st, "cpf", None),
-                    "ra": getattr(st, "ra", None),
-                    "phone": getattr(st, "phone", None),
-                }
-        if "event" in expand_set:
-            ev = getattr(enr, "event", None)
-            if ev:
-                item["event"] = {
-                    "id": ev.id,
-                    "title": getattr(ev, "title", None),
-                    "description": getattr(ev, "description", None),
-                    "venue": getattr(ev, "venue", None),
-                    "start_at": getattr(ev, "start_at", None),
-                    "end_at": getattr(ev, "end_at", None),
-                    "status": getattr(ev, "status", None),
-                    "capacity_total": getattr(ev, "capacity_total", None),
-                    "workload_hours": getattr(ev, "workload_hours", None),
-                    "min_presence_pct": getattr(ev, "min_presence_pct", None),
-                }
-        out.append(item)
+        data = _enr_out(enr)
+        if "student" in expand_set and getattr(enr, "student", None):
+            st = enr.student
+            data["student"] = {
+                "id": st.id, "name": getattr(st, "name", None),
+                "email": getattr(st, "email", None),
+                "cpf": getattr(st, "cpf", None),
+                "ra": getattr(st, "ra", None),
+                "phone": getattr(st, "phone", None),
+            }
+        if "event" in expand_set and getattr(enr, "event", None):
+            ev = enr.event
+            data["event"] = {
+                "id": ev.id, "title": getattr(ev, "title", None),
+                "description": getattr(ev, "description", None),
+                "venue": getattr(ev, "venue", None),
+                "start_at": getattr(ev, "start_at", None),
+                "end_at": getattr(ev, "end_at", None),
+                "status": getattr(ev, "status", None),
+                "capacity_total": getattr(ev, "capacity_total", None),
+                "workload_hours": getattr(ev, "workload_hours", None),
+                "min_presence_pct": getattr(ev, "min_presence_pct", None),
+            }
+        out.append(data)
     return out
-
-@router.put("/enrollments/{enr_id}/cancel")
-def cancel_enr(enr_id: int, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
-    enr = db.get(Enr, enr_id)
-    if not enr or enr.event.client_id != tenant.id: raise HTTPException(404)
-    enr.status = EnrollmentStatus.cancelled
-    db.add(enr); db.commit()
-    return {"ok": True}

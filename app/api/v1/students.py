@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 
+
 @router.get("/")
 def list_students(q: str | None = Query(None), page: int = 1, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
     stmt = select(StudentModel).where(StudentModel.client_id==tenant.id)
