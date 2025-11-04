@@ -13,7 +13,6 @@ from app.core.security_password import hash_password
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from app.api.deps import get_db
 from app.models.client import Client
 
 router = APIRouter()
