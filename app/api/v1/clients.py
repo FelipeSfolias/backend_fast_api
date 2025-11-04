@@ -9,7 +9,19 @@ router = APIRouter()
 # app/api/v1/auth.py (trecho de criação)
 from app.core.security_password import hash_password
 # ...
+# app/api/v1/client.py
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+from app.api.deps import get_db
+from app.models.client import Client
 
+router = APIRouter()
+
+@router.get("/_debug/tenants")
+def list_tenants(db: Session = Depends(get_db)):
+    rows = db.execute(select(Client.id, Client.slug, Client.name)).all()
+    return [{"id": r.id, "slug": r.slug, "name": r.name} for r in rows]
 
 @router.get("/")
 def get_my_client(db: Session = Depends(get_db), tenant = Depends(get_tenant), _=Depends(get_current_user_scoped)):

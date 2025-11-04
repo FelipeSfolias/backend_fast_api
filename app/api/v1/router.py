@@ -11,3 +11,6 @@ api_router.include_router(gate.router, prefix="/{tenant}/gate", tags=["gate"])
 api_router.include_router(attendance.router, prefix="/{tenant}/attendance", tags=["attendance"])
 api_router.include_router(certificates.router, prefix="/{tenant}/certificates", tags=["certificates"])
 api_router.include_router(clients.router, prefix="/{tenant}/client", tags=["client"])
+# onde agrega os routers (ex.: app/api/router.py ou app/main.py)
+api_router.include_router(clients.router, prefix="/{tenant}/client", tags=["client"])
+api_router.include_router(clients.router, prefix="/client", tags=["client-debug"])  # apenas para /_debug/tenants

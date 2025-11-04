@@ -15,8 +15,38 @@ def get_db():
     try: yield db
     finally: db.close()
 
-def get_tenant(tenant: str = Path(...), db: Session = Depends(get_db)):
-    return resolve_tenant(db, tenant)
+# app/api/deps.py
+from fastapi import Depends, HTTPException, Path, Request
+from sqlalchemy import select, func
+from sqlalchemy.orm import Session
+from app.db.session import get_db
+from app.models.client import Client
+
+def _norm_slug(s: str | None) -> str:
+    return (s or "").strip().lower()
+
+def get_tenant(
+    request: Request,
+    tenant: str | None = Path(default=None, description="Tenant slug in path"),
+    db: Session = Depends(get_db),
+) -> Client:
+    # prioridade: path -> header -> query
+    slug = _norm_slug(tenant) or _norm_slug(request.headers.get("X-Tenant")) or _norm_slug(request.query_params.get("tenant"))
+    if not slug:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # match por slug (case-insensitive)
+    stmt = select(Client).where(func.lower(Client.slug) == slug)
+    cli = db.execute(stmt).scalar_one_or_none()
+
+    # fallback: se veio número, tenta por id
+    if not cli and slug.isdigit():
+        cli = db.execute(select(Client).where(Client.id == int(slug))).scalar_one_or_none()
+
+    if not cli:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return cli
+
 
 def get_current_user_scoped(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), tenant=Depends(get_tenant)) -> User:
     payload = decode_access(token)
