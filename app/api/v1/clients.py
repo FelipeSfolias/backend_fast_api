@@ -4,14 +4,7 @@ from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.rbac import require_roles
 from app.schemas.client import Client as ClientOut, ClientUpdate
 from app.models.client import Client as ClientModel
-
-router = APIRouter()
-# app/api/v1/auth.py (trecho de criação)
 from app.core.security_password import hash_password
-# ...
-# app/api/v1/client.py
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.models.client import Client
 
