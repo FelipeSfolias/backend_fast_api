@@ -30,7 +30,7 @@ class ScanIn(BaseModel):
     ts: str | None = None          # ISO 8601 opcional p/ testes (ex: "2025-11-02T08:59:00-03:00")
 
 
-def _parse_ts(ts: str | None) -> dt.datetime:
+def _parse_ts(ts: str | None):
     if not ts:
         return dt.datetime.now(dt.timezone.utc)
     try:
@@ -44,7 +44,7 @@ def _parse_ts(ts: str | None) -> dt.datetime:
         raise HTTPException(status_code=400, detail="INVALID_TS_FORMAT")
 
 
-def _window_utc(day: DayModel) -> tuple[dt.datetime, dt.datetime]:
+def _window_utc(day: DayModel):
     start_local = dt.datetime.combine(day.date, day.start_time, tzinfo=TZ)
     end_local   = dt.datetime.combine(day.date, day.end_time,   tzinfo=TZ)
     if end_local <= start_local:

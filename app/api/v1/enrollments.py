@@ -27,7 +27,7 @@ from app.models.event import Event
 
 router = APIRouter()
 
-@router.post("/events/{event_id}/enroll", response_model=Enrollment, status_code=201,
+@router.post("/events/{event_id}/enroll",status_code=201,
              dependencies=[Depends(require_roles("admin","organizer"))])
 def enroll(event_id: int, student_id: int, idempotent: bool = Query(False),
            db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):

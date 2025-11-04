@@ -23,14 +23,14 @@ router = APIRouter()
 
 # --------------------- Helpers ---------------------
 
-def normalize_email(email: str) -> str:
+def normalize_email(email: str):
     return (email or "").strip().lower()
 
-def ensure_password_policy(password: str) -> None:
+def ensure_password_policy(password: str):
     if not isinstance(password, str) or len(password) < 8 or len(password) > 128:
         raise HTTPException(status_code=400, detail="Senha fora do padrão (8–128).")
 
-def issue_tokens_for(user: User, tenant, scope: str = "") -> dict:
+def issue_tokens_for(user: User, tenant, scope: str = ""):
     sub = user.email
     return {
         "access_token": create_access_token(sub=sub, tenant=tenant.slug, scope=scope),
@@ -38,7 +38,7 @@ def issue_tokens_for(user: User, tenant, scope: str = "") -> dict:
         "token_type": "bearer",
     }
 
-def _get_token_from_body_or_query(token_body: str | None, token_query: str | None) -> str:
+def _get_token_from_body_or_query(token_body: str | None, token_query: str | None):
     tok = token_body or token_query
     if not tok:
         raise HTTPException(
@@ -49,16 +49,16 @@ def _get_token_from_body_or_query(token_body: str | None, token_query: str | Non
 
 _PASSWORD_FIELDS = ["password_hash", "hashed_password", "password"]
 
-def _read_password_field(user: User) -> tuple[str, str | None]:
+def _read_password_field(user: User):
     for f in _PASSWORD_FIELDS:
         if hasattr(user, f):
             return f, getattr(user, f)
     raise AttributeError(f"User model has no password field (expected one of: {_PASSWORD_FIELDS})")
 
-def _looks_hashed(value: str) -> bool:
+def _looks_hashed(value: str):
     return isinstance(value, str) and (value.startswith("$2") or value.startswith("$argon2"))
 
-async def _extract_credentials_from_request(request: Request) -> Tuple[str, str]:
+async def _extract_credentials_from_request(request: Request):
     """
     Extrai (email, password) aceitando:
       - JSON: {"username": "...", "password": "..."}

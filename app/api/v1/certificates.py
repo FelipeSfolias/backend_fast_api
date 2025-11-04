@@ -33,21 +33,21 @@ router = APIRouter(prefix="/certificates", tags=["certificates"])
 # Helpers de segurança / verificação
 # --------------------------------------------------------------------
 
-def _cert_payload(tenant_slug: str, event_id: int, student_id: int, issued_at: str) -> str:
+def _cert_payload(tenant_slug: str, event_id: int, student_id: int, issued_at: str):
     return f"{tenant_slug}|{event_id}|{student_id}|{issued_at}"
 
-def _sign(payload: str) -> str:
+def _sign(payload: str):
     key = settings.SECRET_KEY.encode("utf-8")
     sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return sig
 
-def _make_code(tenant_slug: str, event_id: int, student_id: int) -> str:
+def _make_code(tenant_slug: str, event_id: int, student_id: int):
     issued_at = dt.datetime.utcnow().strftime("%Y%m%d%H%M%S")
     payload = _cert_payload(tenant_slug, event_id, student_id, issued_at)
     sig = _sign(payload)
     return f"{issued_at}.{sig}"
 
-def _verify_code(tenant_slug: str, event_id: int, student_id: int, code: str) -> bool:
+def _verify_code(tenant_slug: str, event_id: int, student_id: int, code: str):
     try:
         issued_at, sig = code.split(".", 1)
     except ValueError:
@@ -61,7 +61,7 @@ def _verify_code(tenant_slug: str, event_id: int, student_id: int, code: str) ->
 
 def _student_is_eligible(
     db: Session, tenant, event_id: int, student_id: int
-) -> Tuple[bool, List[Tuple[dt.datetime, dt.datetime, bool]]]:
+):
     """
     Retorna (eligible, lista_de_dias),
     onde cada item é (inicio_janela, fim_janela, tem_presenca).
@@ -122,7 +122,7 @@ def _compose_certificate_image(
     period_text: str,
     cert_code: str,
     verify_url: str,
-) -> Image.Image:
+):
     # Carrega template
     bg = Image.open(bg_path).convert("RGB")
     W, H = bg.size
@@ -164,7 +164,7 @@ def _compose_certificate_image(
 
     return bg
 
-def _image_to_pdf_bytes(img: Image.Image) -> bytes:
+def _image_to_pdf_bytes(img: Image.Image):
     # Converte imagem para PDF (A4 paisagem) via ReportLab
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=landscape(A4))

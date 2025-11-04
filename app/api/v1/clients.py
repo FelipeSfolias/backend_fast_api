@@ -11,7 +11,7 @@ from app.core.security_password import hash_password
 # ...
 
 
-@router.get("/", response_model=ClientOut)
+@router.get("/")
 def get_my_client(db: Session = Depends(get_db), tenant = Depends(get_tenant), _=Depends(get_current_user_scoped)):
     c: ClientModel = tenant
     return ClientOut(
@@ -22,7 +22,7 @@ def get_my_client(db: Session = Depends(get_db), tenant = Depends(get_tenant), _
         lgpd_policy_text=c.lgpd_policy_text, config_json=c.config_json
     )
 
-@router.put("/", response_model=ClientOut, dependencies=[Depends(require_roles("admin"))])
+@router.put("/",dependencies=[Depends(require_roles("admin"))])
 def update_my_client(body: ClientUpdate, db: Session = Depends(get_db), tenant = Depends(get_tenant), _=Depends(get_current_user_scoped)):
     c: ClientModel = db.get(ClientModel, tenant.id)
     if not c: raise HTTPException(404)

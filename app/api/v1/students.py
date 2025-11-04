@@ -15,14 +15,14 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 
-@router.get("/", response_model=List[Student])
+@router.get("/")
 def list_students(q: str | None = Query(None), page: int = 1, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
     stmt = select(StudentModel).where(StudentModel.client_id==tenant.id)
     if q:
         stmt = stmt.where(StudentModel.name.ilike(f"%{q}%"))
     return [Student(id=s.id, client_id=s.client_id, name=s.name, cpf=s.cpf, email=s.email, ra=s.ra, phone=s.phone) for s in db.execute(stmt).scalars().all()]
 
-@router.post("/", response_model=Student, status_code=201, dependencies=[Depends(require_roles("admin","organizer"))])
+@router.post("/")
 def create_student(
     body: StudentCreate,
     db: Session = Depends(get_db),
