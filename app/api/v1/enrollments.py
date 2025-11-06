@@ -1,24 +1,35 @@
 # app/api/v1/enrollments.py
+from __future__ import annotations
+import secrets
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-import secrets
-
-from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.models.enrollment import Enrollment
-from app.models.student import Student
-from app.models.event import Event
-# app/api/v1/enrollments.py
-from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select
+
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.models.enrollment import Enrollment
 from app.models.student import Student
 from app.models.event import Event
 
-router = APIRouter()
+router = APIRouter()  # <<< NÃO redefinir este router em nenhum outro ponto do arquivo
+
+# ------------------------ helpers ------------------------
+
+STATUS_CANCELED = {"canceled", "cancelled"}
+STATUS_PENDING = "pending"
+STATUS_CONFIRMED = "confirmed"
+
+def _bool_param(val) -> bool:
+    if isinstance(val, bool): return val
+    if isinstance(val, str): return val.lower() in {"1", "true", "t", "yes", "y", "on"}
+    return False
+
+def _new_qr_seed(n: int = 20) -> str:
+    # string curta e URL-safe
+    return secrets.token_urlsafe(n)[:n]
+
+def _expand_param(raw: str) -> set[str]:
+    return {p.strip() for p in (raw or "").split(",") if p.strip()}
 
 def _enr_to_dict(enr: Enrollment) -> dict:
     return {
@@ -84,37 +95,13 @@ def _list_enrollments_core(
         out.append(d)
     return out
 
-def _expand_param(raw: str) -> set[str]:
-    return {p.strip() for p in (raw or "").split(",") if p.strip()}
-
-# ---- TODOS os caminhos chamam a mesma função core ----
+# ------------------------ endpoints: LISTAGEM ------------------------
 
 @router.get("/enrollments")
+@router.get("/enrollments/")          # com barra
+@router.get("")                       # compat raiz do tenant
+@router.get("/")                      # compat raiz do tenant
 def list_enrollments(
-    event_id: int | None = Query(None, alias="event_id"),
-    status: str | None = Query(None, alias="status"),
-    expand: str = Query("", description="Comma-separated: student,event"),
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-    _user = Depends(get_current_user_scoped),
-):
-    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
-
-@router.get("/enrollments/")
-def list_enrollments_slash(
-    event_id: int | None = Query(None, alias="event_id"),
-    status: str | None = Query(None, alias="status"),
-    expand: str = Query("", description="Comma-separated: student,event"),
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-    _user = Depends(get_current_user_scoped),
-):
-    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
-
-# compat: versões antigas listavam em "/{tenant}"
-@router.get("")
-@router.get("/")
-def list_enrollments_root(
     event_id: int | None = Query(None, alias="event_id"),
     status: str | None = Query(None, alias="status"),
     expand: str = Query("", description="Comma-separated: student,event"),
@@ -135,31 +122,7 @@ def list_enrollments_by_event(
 ):
     return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
 
-
-router = APIRouter()
-
-STATUS_CANCELED = {"canceled", "cancelled"}
-STATUS_PENDING = "pending"
-STATUS_CONFIRMED = "confirmed"
-
-def _bool_param(val):
-    if isinstance(val, bool): return val
-    if isinstance(val, str): return val.lower() in {"1","true","t","yes","y","on"}
-    return False
-
-def _new_qr_seed(n: int = 20) -> str:
-    # string curta, URL-safe; ajuste n se quiser maior
-    return secrets.token_urlsafe(n)[:n]
-
-def _enr_out(enr: Enrollment) -> dict:
-    return {
-        "id": enr.id,
-        "student_id": enr.student_id,
-        "event_id": enr.event_id,
-        "status": enr.status,
-        # acrescente se quiser expor
-        # "qr_seed": getattr(enr, "qr_seed", None),
-    }
+# ------------------------ endpoints: CREATE/CANCEL ------------------------
 
 @router.post("/events/{event_id}/enroll", status_code=201)
 def enroll_student(
@@ -189,18 +152,18 @@ def enroll_student(
 
     if existing:
         if idem:
-            return _enr_out(existing)
+            return _enr_to_dict(existing)
         if existing.status in STATUS_CANCELED and reactivate:
             existing.status = STATUS_PENDING
             db.add(existing); db.commit(); db.refresh(existing)
-            return _enr_out(existing)
+            return _enr_to_dict(existing)
         if existing.status not in STATUS_CANCELED:
             raise HTTPException(status_code=409, detail="already_enrolled")
         raise HTTPException(status_code=409, detail="enrollment_canceled")
 
     enr = Enrollment(student_id=student_id, event_id=event_id, status=STATUS_PENDING)
 
-    # >>>>>>>>> FIX PRINCIPAL: preencher qr_seed se campo existir e estiver vazio
+    # Preenche qr_seed se existir e for NOT NULL
     if hasattr(Enrollment, "qr_seed") and not getattr(enr, "qr_seed", None):
         setattr(enr, "qr_seed", _new_qr_seed())
 
@@ -209,17 +172,32 @@ def enroll_student(
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        # pg codes: 23505 unique_violation, 23502 not_null_violation
         pgcode = getattr(getattr(e, "orig", None), "pgcode", None)
-        if pgcode == "23505":
-            # duplicado → se idempotent, retorna o existente; senão 409
+        if pgcode == "23505":  # unique_violation
             if idem and existing:
-                return _enr_out(existing)
+                return _enr_to_dict(existing)
             raise HTTPException(status_code=409, detail="duplicate_enrollment")
-        if pgcode == "23502":
-            # not null violation: provavelmente qr_seed não preenchido
+        if pgcode == "23502":  # not_null_violation
             raise HTTPException(status_code=500, detail="missing_required_column (qr_seed?)")
-        # outro erro
         raise HTTPException(status_code=500, detail="db_error")
+
     db.refresh(enr)
-    return _enr_out(enr)
+    return _enr_to_dict(enr)
+
+@router.post("/enrollments/{enr_id}/cancel")
+def cancel_enrollment(
+    enr_id: int,
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    enr = db.execute(
+        select(Enrollment)
+        .join(Event, Enrollment.event_id == Event.id)
+        .where(Enrollment.id == enr_id, Event.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not enr:
+        raise HTTPException(status_code=404, detail="enrollment_not_found")
+    enr.status = "canceled"
+    db.add(enr); db.commit(); db.refresh(enr)
+    return _enr_to_dict(enr)
