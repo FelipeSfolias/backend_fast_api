@@ -9,6 +9,132 @@ from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.models.enrollment import Enrollment
 from app.models.student import Student
 from app.models.event import Event
+# app/api/v1/enrollments.py
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import select
+from app.api.deps import get_db, get_tenant, get_current_user_scoped
+from app.models.enrollment import Enrollment
+from app.models.student import Student
+from app.models.event import Event
+
+router = APIRouter()
+
+def _enr_to_dict(enr: Enrollment) -> dict:
+    return {
+        "id": enr.id,
+        "student_id": enr.student_id,
+        "event_id": enr.event_id,
+        "status": enr.status,
+    }
+
+def _list_enrollments_core(
+    db: Session,
+    tenant,
+    event_id: int | None,
+    status: str | None,
+    expand: set[str],
+):
+    stmt = (
+        select(Enrollment)
+        .join(Event, Enrollment.event_id == Event.id)
+        .where(Event.client_id == tenant.id)
+    )
+    if event_id is not None:
+        stmt = stmt.where(Enrollment.event_id == event_id)
+    if status:
+        stmt = stmt.where(Enrollment.status == status)
+
+    opts = []
+    if "student" in expand:
+        opts.append(joinedload(Enrollment.student))
+    if "event" in expand:
+        opts.append(joinedload(Enrollment.event))
+    if opts:
+        stmt = stmt.options(*opts)
+
+    rows = db.execute(stmt).scalars().all()
+    out = []
+    for enr in rows:
+        d = _enr_to_dict(enr)
+        if "student" in expand and getattr(enr, "student", None):
+            st = enr.student
+            d["student"] = {
+                "id": st.id,
+                "name": getattr(st, "name", None),
+                "email": getattr(st, "email", None),
+                "cpf": getattr(st, "cpf", None),
+                "ra": getattr(st, "ra", None),
+                "phone": getattr(st, "phone", None),
+            }
+        if "event" in expand and getattr(enr, "event", None):
+            ev = enr.event
+            d["event"] = {
+                "id": ev.id,
+                "title": getattr(ev, "title", None),
+                "description": getattr(ev, "description", None),
+                "venue": getattr(ev, "venue", None),
+                "start_at": getattr(ev, "start_at", None),
+                "end_at": getattr(ev, "end_at", None),
+                "status": getattr(ev, "status", None),
+                "capacity_total": getattr(ev, "capacity_total", None),
+                "workload_hours": getattr(ev, "workload_hours", None),
+                "min_presence_pct": getattr(ev, "min_presence_pct", None),
+            }
+        out.append(d)
+    return out
+
+def _expand_param(raw: str) -> set[str]:
+    return {p.strip() for p in (raw or "").split(",") if p.strip()}
+
+# ---- TODOS os caminhos chamam a mesma função core ----
+
+@router.get("/enrollments")
+def list_enrollments(
+    event_id: int | None = Query(None, alias="event_id"),
+    status: str | None = Query(None, alias="status"),
+    expand: str = Query("", description="Comma-separated: student,event"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
+
+@router.get("/enrollments/")
+def list_enrollments_slash(
+    event_id: int | None = Query(None, alias="event_id"),
+    status: str | None = Query(None, alias="status"),
+    expand: str = Query("", description="Comma-separated: student,event"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
+
+# compat: versões antigas listavam em "/{tenant}"
+@router.get("")
+@router.get("/")
+def list_enrollments_root(
+    event_id: int | None = Query(None, alias="event_id"),
+    status: str | None = Query(None, alias="status"),
+    expand: str = Query("", description="Comma-separated: student,event"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
+
+@router.get("/events/{event_id}/enrollments")
+def list_enrollments_by_event(
+    event_id: int,
+    status: str | None = Query(None, alias="status"),
+    expand: str = Query("", description="Comma-separated: student,event"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
+
 
 router = APIRouter()
 
