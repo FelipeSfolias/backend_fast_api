@@ -184,7 +184,8 @@ def enroll_student(
     db.refresh(enr)
     return _enr_to_dict(enr)
 
-@router.post("/enrollments/{enr_id}/cancel")
+# aceita POST, PUT e PATCH
+@router.api_route("/enrollments/{enr_id}/cancel", methods=["POST", "PUT", "PATCH"])
 def cancel_enrollment(
     enr_id: int,
     db: Session = Depends(get_db),
@@ -198,6 +199,16 @@ def cancel_enrollment(
     ).scalar_one_or_none()
     if not enr:
         raise HTTPException(status_code=404, detail="enrollment_not_found")
-    enr.status = "canceled"
-    db.add(enr); db.commit(); db.refresh(enr)
-    return _enr_to_dict(enr)
+
+    # idempotente: se já estiver cancelado, só retorna 200 com o mesmo estado
+    if enr.status not in {"canceled", "cancelled"}:
+        enr.status = "canceled"
+        db.add(enr); db.commit(); db.refresh(enr)
+
+    return {
+        "id": enr.id,
+        "student_id": enr.student_id,
+        "event_id": enr.event_id,
+        "status": enr.status,
+    }
+
