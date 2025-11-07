@@ -164,6 +164,35 @@ def delete_event(
 @router.put("/{event_id}/days/{day_id}",
             response_model=DayEvent,
             dependencies=[Depends(require_roles("admin","organizer"))])
+
+@router.get("/{event_id}/days/{day_id}", response_model=DayEvent)
+def get_day(
+    event_id: int = Path(..., ge=1),
+    day_id: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _ = Depends(get_current_user_scoped),
+):
+    # valida se o evento é do tenant
+    e = db.get(EventModel, event_id)
+    if not e or e.client_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Evento não encontrado")
+
+    # carrega o dia vinculado ao evento
+    d = db.get(DayModel, day_id)
+    if not d or d.event_id != e.id:
+        raise HTTPException(status_code=404, detail="Dia do evento não encontrado")
+
+    return DayEvent(
+        id=d.id,
+        event_id=d.event_id,
+        date=d.date,
+        start_time=d.start_time,
+        end_time=d.end_time,
+        room=d.room,
+        capacity=d.capacity,
+    )
+    
 def update_day(
     event_id: int,
     day_id: int,
