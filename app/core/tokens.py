@@ -13,10 +13,10 @@ ALGO = settings.ALGORITHM
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def _exp(minutes: int) -> int:
+def _exp_minutes(minutes: int) -> int:
     return int((_utcnow() + timedelta(minutes=minutes)).timestamp())
 
-def _rexp(days: int) -> int:
+def _exp_days(days: int) -> int:
     return int((_utcnow() + timedelta(days=days)).timestamp())
 
 def create_access_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any]] = None) -> str:
@@ -25,7 +25,7 @@ def create_access_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any]
         "type": "access",
         "sub": int(sub),
         "tenant": str(tenant),
-        "exp": _exp(settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        "exp": _exp_minutes(settings.ACCESS_TOKEN_EXPIRE_MINUTES),
         "iat": int(_utcnow().timestamp()),
     }
     if extra:
@@ -38,7 +38,7 @@ def create_refresh_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any
         "type": "refresh",
         "sub": int(sub),
         "tenant": str(tenant),
-        "exp": _rexp(settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        "exp": _exp_days(settings.REFRESH_TOKEN_EXPIRE_DAYS),
         "iat": int(_utcnow().timestamp()),
     }
     if extra:
@@ -50,11 +50,7 @@ def decode_access(token: str) -> Optional[Dict[str, Any]]:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGO])
     except JWTError:
         return None
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("type") != "access":
-        return None
-    if not payload.get("sub") or not payload.get("tenant"):
+    if payload.get("type") != "access" or not payload.get("sub") or not payload.get("tenant"):
         return None
     return payload
 
@@ -63,10 +59,6 @@ def decode_refresh(token: str) -> Optional[Dict[str, Any]]:
         payload = jwt.decode(token, settings.REFRESH_SECRET_KEY, algorithms=[ALGO])
     except JWTError:
         return None
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("type") != "refresh":
-        return None
-    if not payload.get("sub") or not payload.get("tenant"):
+    if payload.get("type") != "refresh" or not payload.get("sub") or not payload.get("tenant"):
         return None
     return payload
