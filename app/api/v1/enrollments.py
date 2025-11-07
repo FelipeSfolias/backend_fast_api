@@ -1,111 +1,214 @@
 # app/api/v1/enrollments.py
 from __future__ import annotations
-
 import secrets
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload
+
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.core.rbac import require_roles, ROLE_ADMIN, ROLE_ORGANIZER, ROLE_ALUNO
-from app.models.enrollment import Enrollment as EnrollmentModel
-from app.models.student import Student as StudentModel
-from app.models.event import Event as EventModel
-from app.schemas.enrollment import Enrollment as EnrollmentOut, EnrollmentCreate
+from app.models.enrollment import Enrollment
+from app.models.student import Student
+from app.models.event import Event
 
-router = APIRouter()
+router = APIRouter()  # <<< NÃO redefinir este router em nenhum outro ponto do arquivo
 
-def _current_student_id(db: Session, tenant, user) -> Optional[int]:
-    """Resolve o Student.id correspondente ao usuário atual (por e-mail + tenant)."""
-    st = db.execute(
-        select(StudentModel.id).where(
-            StudentModel.client_id == tenant.id,
-            StudentModel.email == user.email
-        )
-    ).scalar_one_or_none()
-    return st
+# ------------------------ helpers ------------------------
 
-@router.get("/", response_model=List[EnrollmentOut])
-def list_enrollments(
-    event_id: Optional[int] = Query(None),
-    status: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-    user = Depends(get_current_user_scoped),
+STATUS_CANCELED = {"canceled", "cancelled"}
+STATUS_PENDING = "pending"
+STATUS_CONFIRMED = "confirmed"
+
+def _bool_param(val) -> bool:
+    if isinstance(val, bool): return val
+    if isinstance(val, str): return val.lower() in {"1", "true", "t", "yes", "y", "on"}
+    return False
+
+def _new_qr_seed(n: int = 20) -> str:
+    # string curta e URL-safe
+    return secrets.token_urlsafe(n)[:n]
+
+def _expand_param(raw: str) -> set[str]:
+    return {p.strip() for p in (raw or "").split(",") if p.strip()}
+
+def _enr_to_dict(enr: Enrollment) -> dict:
+    return {
+        "id": enr.id,
+        "student_id": enr.student_id,
+        "event_id": enr.event_id,
+        "status": enr.status,
+    }
+
+def _list_enrollments_core(
+    db: Session,
+    tenant,
+    event_id: int | None,
+    status: str | None,
+    expand: set[str],
 ):
     stmt = (
-        select(EnrollmentModel)
-        .join(StudentModel, StudentModel.id == EnrollmentModel.student_id)
-        .where(StudentModel.client_id == tenant.id)
+        select(Enrollment)
+        .join(Event, Enrollment.event_id == Event.id)
+        .where(Event.client_id == tenant.id)
     )
     if event_id is not None:
-        stmt = stmt.where(EnrollmentModel.event_id == event_id)
-    if status is not None:
-        stmt = stmt.where(EnrollmentModel.status == status)
+        stmt = stmt.where(Enrollment.event_id == event_id)
+    if status:
+        stmt = stmt.where(Enrollment.status == status)
 
-    # LGPD: aluno só vê as próprias matrículas (por e-mail)
-    role_names = {r.name for r in user.roles or []}
-    if ROLE_ALUNO in role_names:
-        my_sid = _current_student_id(db, tenant, user)
-        if not my_sid:
-            return []  # sem vínculo de student
-        stmt = stmt.where(EnrollmentModel.student_id == my_sid)
+    opts = []
+    if "student" in expand:
+        opts.append(joinedload(Enrollment.student))
+    if "event" in expand:
+        opts.append(joinedload(Enrollment.event))
+    if opts:
+        stmt = stmt.options(*opts)
 
     rows = db.execute(stmt).scalars().all()
-    return rows
+    out = []
+    for enr in rows:
+        d = _enr_to_dict(enr)
+        if "student" in expand and getattr(enr, "student", None):
+            st = enr.student
+            d["student"] = {
+                "id": st.id,
+                "name": getattr(st, "name", None),
+                "email": getattr(st, "email", None),
+                "cpf": getattr(st, "cpf", None),
+                "ra": getattr(st, "ra", None),
+                "phone": getattr(st, "phone", None),
+            }
+        if "event" in expand and getattr(enr, "event", None):
+            ev = enr.event
+            d["event"] = {
+                "id": ev.id,
+                "title": getattr(ev, "title", None),
+                "description": getattr(ev, "description", None),
+                "venue": getattr(ev, "venue", None),
+                "start_at": getattr(ev, "start_at", None),
+                "end_at": getattr(ev, "end_at", None),
+                "status": getattr(ev, "status", None),
+                "capacity_total": getattr(ev, "capacity_total", None),
+                "workload_hours": getattr(ev, "workload_hours", None),
+                "min_presence_pct": getattr(ev, "min_presence_pct", None),
+            }
+        out.append(d)
+    return out
 
-@router.get("/events/{event_id}/enrollments", response_model=List[EnrollmentOut])
+# ------------------------ endpoints: LISTAGEM ------------------------
+
+@router.get("/enrollments")
+@router.get("/enrollments/")          # com barra
+@router.get("")                       # compat raiz do tenant
+@router.get("/")                      # compat raiz do tenant
+def list_enrollments(
+    event_id: int | None = Query(None, alias="event_id"),
+    status: str | None = Query(None, alias="status"),
+    expand: str = Query("", description="Comma-separated: student,event"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _user = Depends(get_current_user_scoped),
+):
+    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
+
+@router.get("/events/{event_id}/enrollments")
 def list_enrollments_by_event(
     event_id: int,
+    status: str | None = Query(None, alias="status"),
+    expand: str = Query("", description="Comma-separated: student,event"),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
-    user = Depends(get_current_user_scoped),
+    _user = Depends(get_current_user_scoped),
 ):
-    return list_enrollments(event_id=event_id, status=None, db=db, tenant=tenant, user=user)  # type: ignore
+    return _list_enrollments_core(db, tenant, event_id, status, _expand_param(expand))
 
-@router.post("/", response_model=EnrollmentOut, status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_roles(ROLE_ADMIN, ROLE_ORGANIZER))])
-def create_enrollment(
-    body: EnrollmentCreate,
+# ------------------------ endpoints: CREATE/CANCEL ------------------------
+
+@router.post("/events/{event_id}/enroll", status_code=201)
+def enroll_student(
+    event_id: int,
+    student_id: int = Query(..., alias="student_id"),
+    idempotent: str | bool | None = Query(False, alias="idempotent"),
+    reactivate_if_canceled: str | bool | None = Query(True, alias="reactivate_if_canceled"),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
-    _ = Depends(get_current_user_scoped),
+    _user = Depends(get_current_user_scoped),
 ):
-    # valida student e event do mesmo tenant
-    st = db.get(StudentModel, body.student_id)
-    if not st or st.client_id != tenant.id:
-        raise HTTPException(status_code=404, detail="Student não encontrado")
-    ev = db.get(EventModel, body.event_id)
-    if not ev or ev.client_id != tenant.id:
-        raise HTTPException(status_code=404, detail="Evento não encontrado")
+    idem = _bool_param(idempotent)
+    reactivate = _bool_param(reactivate_if_canceled)
 
-    # cria matrícula
-    obj = EnrollmentModel(
-        student_id=body.student_id,
-        event_id=body.event_id,
-        status="pending",
-        qr_seed=secrets.token_hex(16),
-    )
-    db.add(obj); db.commit(); db.refresh(obj)
-    return obj
+    # Escopo por tenant
+    ev = db.execute(select(Event).where(Event.id == event_id, Event.client_id == tenant.id)).scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="event_not_found")
 
-@router.post("/{enrollment_id}/cancel", response_model=EnrollmentOut,
-             dependencies=[Depends(require_roles(ROLE_ADMIN, ROLE_ORGANIZER))])
+    st = db.execute(select(Student).where(Student.id == student_id, Student.client_id == tenant.id)).scalar_one_or_none()
+    if not st:
+        raise HTTPException(status_code=404, detail="student_not_found")
+
+    existing = db.execute(
+        select(Enrollment).where(Enrollment.event_id == event_id, Enrollment.student_id == student_id)
+    ).scalar_one_or_none()
+
+    if existing:
+        if idem:
+            return _enr_to_dict(existing)
+        if existing.status in STATUS_CANCELED and reactivate:
+            existing.status = STATUS_PENDING
+            db.add(existing); db.commit(); db.refresh(existing)
+            return _enr_to_dict(existing)
+        if existing.status not in STATUS_CANCELED:
+            raise HTTPException(status_code=409, detail="already_enrolled")
+        raise HTTPException(status_code=409, detail="enrollment_canceled")
+
+    enr = Enrollment(student_id=student_id, event_id=event_id, status=STATUS_PENDING)
+
+    # Preenche qr_seed se existir e for NOT NULL
+    if hasattr(Enrollment, "qr_seed") and not getattr(enr, "qr_seed", None):
+        setattr(enr, "qr_seed", _new_qr_seed())
+
+    db.add(enr)
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        pgcode = getattr(getattr(e, "orig", None), "pgcode", None)
+        if pgcode == "23505":  # unique_violation
+            if idem and existing:
+                return _enr_to_dict(existing)
+            raise HTTPException(status_code=409, detail="duplicate_enrollment")
+        if pgcode == "23502":  # not_null_violation
+            raise HTTPException(status_code=500, detail="missing_required_column (qr_seed?)")
+        raise HTTPException(status_code=500, detail="db_error")
+
+    db.refresh(enr)
+    return _enr_to_dict(enr)
+
+# aceita POST, PUT e PATCH
+@router.api_route("/enrollments/{enr_id}/cancel", methods=["POST", "PUT", "PATCH"])
 def cancel_enrollment(
-    enrollment_id: int,
+    enr_id: int,
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
-    _ = Depends(get_current_user_scoped),
+    _user = Depends(get_current_user_scoped),
 ):
-    enr = db.get(EnrollmentModel, enrollment_id)
+    enr = db.execute(
+        select(Enrollment)
+        .join(Event, Enrollment.event_id == Event.id)
+        .where(Enrollment.id == enr_id, Event.client_id == tenant.id)
+    ).scalar_one_or_none()
     if not enr:
-        raise HTTPException(status_code=404, detail="Enrollment não encontrado")
-    # valida que matrícula pertence ao tenant via student->client_id
-    st = db.get(StudentModel, enr.student_id)
-    if not st or st.client_id != tenant.id:
-        raise HTTPException(status_code=404, detail="Enrollment não encontrado")
+        raise HTTPException(status_code=404, detail="enrollment_not_found")
 
-    if str(enr.status).lower() not in {"canceled","cancelled"}:
-        enr.status = "cancelled"
+    # idempotente: se já estiver cancelado, só retorna 200 com o mesmo estado
+    if enr.status not in {"canceled", "cancelled"}:
+        enr.status = "canceled"
         db.add(enr); db.commit(); db.refresh(enr)
-    return enr
+
+    return {
+        "id": enr.id,
+        "student_id": enr.student_id,
+        "event_id": enr.event_id,
+        "status": enr.status,
+    }
+
