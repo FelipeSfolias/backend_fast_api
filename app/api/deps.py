@@ -3,14 +3,15 @@ from __future__ import annotations
 from typing import Generator
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import select, func
+from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models.client import Client
 from app.models.user import User
-from app.core.tokens import decode_access  # precisa existir no seu projeto
+from app.core.tokens import decode_access
 
+# ---------- DB ----------
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
@@ -18,38 +19,59 @@ def get_db() -> Generator[Session, None, None]:
     finally:
         db.close()
 
-def _load_tenant(db: Session, tenant_param: str) -> Client | None:
-    if tenant_param.isdigit():
-        return db.get(Client, int(tenant_param))
-    return db.execute(select(Client).where(Client.slug == tenant_param)).scalar_one_or_none()
+def _norm(s: str | None) -> str:
+    return (s or "").strip().lower()
 
 def get_tenant(request: Request, db: Session = Depends(get_db)) -> Client:
-    tenant_param = request.path_params.get("tenant")
-    if tenant_param is None:
-        raise HTTPException(status_code=400, detail="Tenant ausente na rota")
-    tenant = _load_tenant(db, str(tenant_param))
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant não encontrado")
-    return tenant
+    slug = (
+        _norm(request.path_params.get("tenant"))
+        or _norm(request.headers.get("X-Tenant"))
+        or _norm(request.query_params.get("tenant"))
+    )
+    if not slug:
+        raise HTTPException(status_code=404, detail="Tenant not found")
 
-def _load_user_by_sub(db: Session, tenant: Client, sub: int) -> User | None:
+    cli = db.execute(select(Client).where(func.lower(Client.slug) == slug)).scalar_one_or_none()
+    if not cli and slug.isdigit():
+        cli = db.execute(select(Client).where(Client.id == int(slug))).scalar_one_or_none()
+    if not cli:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return cli
+
+# ---------- Auth ----------
+def _get_bearer_token(request: Request) -> str:
+    auth = request.headers.get("Authorization") or ""
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return auth.split(" ", 1)[1].strip()
+
+def _load_user_by_sub(db: Session, tenant: Client, sub: str) -> User | None:
+    # teu sub é e-mail (padrão). Aceita id numérico como fallback.
+    if sub and sub.isdigit():
+        return db.execute(
+            select(User).where(
+                User.id == int(sub),
+                (getattr(User, "client_id") == tenant.id) if hasattr(User, "client_id") else User.client.has(id=tenant.id),
+            )
+        ).scalar_one_or_none()
     return db.execute(
-        select(User).options(joinedload(User.roles)).where(User.id == int(sub), User.client_id == tenant.id)
+        select(User).where(
+            User.email == sub,
+            User.client.has(slug=tenant.slug),
+        )
     ).scalar_one_or_none()
 
 def get_current_user_scoped(
-    token: str = Depends(lambda request: request.headers.get("Authorization","").split("Bearer ",1)[-1] if "Authorization" in request.headers else ""),
+    request: Request,
     db: Session = Depends(get_db),
     tenant: Client = Depends(get_tenant),
 ) -> User:
-    if not token:
-        raise HTTPException(status_code=401, detail="Não autenticado")
+    """Valida access token e escopo (tenant), e retorna o usuário do tenant."""
+    token = _get_bearer_token(request)
     payload = decode_access(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Token inválido ou expirado")
-
-    token_tenant = str(payload.get("tenant"))
-    if token_tenant not in {str(tenant.id), tenant.slug}:
+    if not payload or payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if payload.get("tenant") != tenant.slug:
         raise HTTPException(status_code=401, detail="Tenant mismatch")
 
     sub = payload.get("sub")
@@ -59,11 +81,7 @@ def get_current_user_scoped(
     user = _load_user_by_sub(db, tenant, sub)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-
-    status_val = getattr(user, "status", "active")
-    if status_val and str(status_val).lower() != "active":
-        raise HTTPException(status_code=401, detail="User disabled")
-
     return user
 
+# alias legado
 get_current_user = get_current_user_scoped

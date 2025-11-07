@@ -1,248 +1,217 @@
 # app/api/v1/auth.py
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Body, status
+import json
+from datetime import datetime, timezone
+from urllib.parse import parse_qs
+
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-import sqlalchemy as sa
-from jose import jwt
 
-from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.core.tokens import create_access_token, decode_refresh  # usamos só o decode no /refresh
-from app.core.security import verify_and_maybe_upgrade, hash_password
-from app.core.rbac import require_roles, ROLE_ADMIN
-from app.core.config import settings
+from app.api.deps import get_db, get_tenant
+from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
+from app.core.security_password import verify_and_maybe_upgrade  # teu módulo original
 
 from app.models.user import User
 from app.models.role import Role
-from app.schemas.user import UserCreate, User as UserSchema
+from app.models.tokens import RefreshToken  # já existe no teu ZIP
 
 router = APIRouter()
 
-def _utcnow():
-    return datetime.now(timezone.utc)
+# ---------- helpers ----------
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
 
-# ---------- SQL helpers (Core) ----------
-_INS_REFRESH = sa.text("""
-    INSERT INTO refresh_tokens (jti, user_email, tenant_slug, expires_at, revoked_at)
-    VALUES (:jti, :user_email, :tenant_slug, :expires_at, NULL)
-    ON CONFLICT (jti) DO NOTHING
-""").bindparams(
-    sa.bindparam("jti", type_=sa.String(64)),
-    sa.bindparam("user_email", type_=sa.String(160)),
-    sa.bindparam("tenant_slug", type_=sa.String(64)),
-    sa.bindparam("expires_at", type_=sa.DateTime(timezone=True)),
-)
+def ensure_password_policy(password: str):
+    if not isinstance(password, str) or len(password) < 8 or len(password) > 128:
+        raise HTTPException(status_code=400, detail="Senha fora do padrão (8–128).")
 
-_SEL_REFRESH_BY_JTI = sa.text("""
-    SELECT jti, user_email, tenant_slug, expires_at, revoked_at
-    FROM refresh_tokens
-    WHERE jti = :jti
-""").bindparams(
-    sa.bindparam("jti", type_=sa.String(64))
-)
+def issue_tokens_for(user: User, tenant, scope: str = ""):
+    sub = user.email  # <- IMPORTANTE: teu sub é o e-mail
+    return {
+        "access_token": create_access_token(sub=sub, tenant=tenant.slug, scope=scope),
+        "refresh_token": create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope),
+        "token_type": "bearer",
+    }
 
-_UPD_REVOKE_BY_JTI = sa.text("""
-    UPDATE refresh_tokens
-    SET revoked_at = :now
-    WHERE jti = :jti
-      AND revoked_at IS NULL
-      AND tenant_slug = :tenant_slug
-""").bindparams(
-    sa.bindparam("now", type_=sa.DateTime(timezone=True)),
-    sa.bindparam("jti", type_=sa.String(64)),
-    sa.bindparam("tenant_slug", type_=sa.String(64)),
-)
+def _read_password_field(user: User):
+    for name in ["password_hash", "hashed_password", "password"]:
+        if hasattr(user, name):
+            return name, getattr(user, name)
+    raise HTTPException(status_code=500, detail="Modelo de usuário sem campo de senha")
 
-_UPD_REVOKE_ALL = sa.text("""
-    UPDATE refresh_tokens
-    SET revoked_at = :now
-    WHERE user_email = :email
-      AND tenant_slug = :tenant_slug
-      AND revoked_at IS NULL
-""").bindparams(
-    sa.bindparam("now", type_=sa.DateTime(timezone=True)),
-    sa.bindparam("email", type_=sa.String(160)),
-    sa.bindparam("tenant_slug", type_=sa.String(64)),
-)
+async def _extract_credentials_from_request(request: Request) -> tuple[str, str]:
+    # 1) JSON {username,password} ou {email,password}
+    if request.headers.get("content-type", "").lower().startswith("application/json"):
+        data = await request.json()
+        if isinstance(data, dict):
+            email = normalize_email(data.get("username") or data.get("email") or "")
+            password = data.get("password") or ""
+            if email and password:
+                return email, password
+
+    # 2) x-www-form-urlencoded (username/password)
+    if request.headers.get("content-type", "").lower().startswith("application/x-www-form-urlencoded"):
+        form = await request.body()
+        parsed = parse_qs(form.decode(), keep_blank_values=True)
+        email = normalize_email((parsed.get("username", [""])[0]) or "")
+        password = (parsed.get("password", [""])[0]) or ""
+        if email and password:
+            return email, password
+
+    # 3) texto puro "username=...&password=..."
+    raw = (await request.body()).decode()
+    if raw:
+        parsed = parse_qs(raw, keep_blank_values=True)
+        email = normalize_email((parsed.get("username", [""])[0]) or "")
+        password = (parsed.get("password", [""])[0]) or ""
+        if email and password:
+            return email, password
+
+    raise HTTPException(
+        status_code=422,
+        detail=[{"loc": ["body"], "msg": "Esperado JSON {username,password} ou form-urlencoded ou raw 'username=...&password=...'", "type": "value_error"}],
+    )
+
+def _get_token_from_body_or_query(token_body: str | None, token_query: str | None) -> str:
+    tok = token_body or token_query
+    if not tok:
+        raise HTTPException(status_code=422, detail=[{"loc": ["token"], "msg": "Field required", "type": "value_error.missing"}])
+    return tok
 
 # ---------- endpoints ----------
 @router.post("/login")
-def login_for_access_token(
+async def login(
+    request: Request,
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+):
+    email, password = await _extract_credentials_from_request(request)
+    ensure_password_policy(password)
+
+    user = db.execute(
+        select(User).where(User.email == email, User.client.has(slug=tenant.slug))
+    ).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+
+    field_name, stored_hash = _read_password_field(user)
+    ok, new_hash = verify_and_maybe_upgrade(password, stored_hash)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+    if new_hash:
+        setattr(user, field_name, new_hash)
+        db.add(user); db.commit()
+
+    tokens = issue_tokens_for(user, tenant)
+    # registra refresh (se o model existir com jti)
+    payload = decode_refresh(tokens["refresh_token"])
+    try:
+        if payload and payload.get("jti"):
+            row = RefreshToken(jti=payload["jti"])
+            if hasattr(row, "tenant_slug"):
+                row.tenant_slug = tenant.slug
+            if hasattr(row, "user_email"):
+                row.user_email = user.email
+            if hasattr(row, "issued_at") and "iat" in payload:
+                row.issued_at = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
+            if hasattr(row, "expires_at") and "exp" in payload:
+                row.expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+            db.add(row); db.commit()
+    except Exception:
+        pass
+
+    return tokens
+
+@router.post("/token")
+def login_oauth2_form(
     form: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
 ):
+    email = normalize_email(form.username)
+    password = form.password or ""
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="E-mail e senha são obrigatórios.")
+    ensure_password_policy(password)
+
     user = db.execute(
-        select(User).where(User.email == form.username, User.client_id == tenant.id)
+        select(User).where(User.email == email, User.client.has(slug=tenant.slug))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="E-mail ou senha inválidos")
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
 
-    ok, new_hash = verify_and_maybe_upgrade(form.password, user.hashed_password)
+    field_name, stored_hash = _read_password_field(user)
+    ok, new_hash = verify_and_maybe_upgrade(password, stored_hash)
     if not ok:
-        raise HTTPException(status_code=401, detail="E-mail ou senha inválidos")
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
     if new_hash:
-        user.hashed_password = new_hash
+        setattr(user, field_name, new_hash)
         db.add(user); db.commit()
 
-    tenant_claim = tenant.slug or str(tenant.id)
-
-    # access token normal
-    access = create_access_token(sub=user.id, tenant=tenant_claim)
-
-    # ----- refresh token sem "auto-decode": montamos payload e assinamos -----
-    now = _utcnow()
-    jti = uuid.uuid4().hex
-    exp_at = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    payload_refresh = {
-        "jti": jti,
-        "type": "refresh",
-        "sub": int(user.id),
-        "tenant": str(tenant_claim),
-        "exp": int(exp_at.timestamp()),
-        "iat": int(now.timestamp()),
-    }
-    refresh = jwt.encode(payload_refresh, settings.REFRESH_SECRET_KEY, algorithm=settings.ALGORITHM)
-
-    # Persistimos usando os MESMOS valores (sem decodificar)
-    db.execute(
-        _INS_REFRESH,
-        {
-            "jti": jti,
-            "user_email": user.email,
-            "tenant_slug": tenant_claim,
-            "expires_at": exp_at,
-        },
-    )
-    db.commit()
-
-    return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
+    return issue_tokens_for(user, tenant)
 
 @router.post("/refresh")
-def refresh_access_token(
-    token: str = Body(..., embed=True),
+def refresh(
+    token: str | None = Body(default=None, embed=True),        # {"token":"<refresh>"}
+    token_q: str | None = Query(default=None, alias="token"),  # ?token=<refresh>
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
 ):
-    payload = decode_refresh(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Refresh inválido ou expirado")
+    tok = _get_token_from_body_or_query(token, token_q)
+    payload = decode_refresh(tok)
+    if not payload or payload.get("tenant") != tenant.slug or payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-    t_claim = str(payload.get("tenant"))
-    if t_claim not in {str(tenant.id), tenant.slug}:
-        raise HTTPException(status_code=401, detail="Tenant mismatch")
+    sub = payload.get("sub")
+    scope = payload.get("scope", "")
 
-    jti = payload.get("jti")
-    if not jti:
-        raise HTTPException(status_code=401, detail="Refresh inválido")
+    new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
+    new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
-    row = db.execute(_SEL_REFRESH_BY_JTI, {"jti": jti}).mappings().first()
-    if not row:
-        raise HTTPException(status_code=401, detail="Refresh não encontrado")
-    if row["tenant_slug"] != t_claim:
-        raise HTTPException(status_code=401, detail="Tenant mismatch")
-    if row["revoked_at"] is not None:
-        raise HTTPException(status_code=401, detail="Refresh revogado")
-    if row["expires_at"] <= _utcnow():
-        raise HTTPException(status_code=401, detail="Refresh expirado")
+    # rotação (revoga antigo e registra o novo) se houver jti
+    try:
+        if hasattr(RefreshToken, "jti"):
+            old_jti = payload.get("jti")
+            if old_jti:
+                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == old_jti)).scalar_one_or_none()
+                if rt and getattr(rt, "revoked_at", None) is None:
+                    rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+                    db.add(rt)
 
-    user = db.execute(
-        select(User).where(User.id == int(payload["sub"]), User.client_id == tenant.id)
-    ).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+            new_payload = decode_refresh(new_refresh)
+            if new_payload and new_payload.get("jti"):
+                row = RefreshToken(jti=new_payload["jti"])
+                if hasattr(row, "tenant_slug"):
+                    row.tenant_slug = tenant.slug
+                if hasattr(row, "user_email"):
+                    row.user_email = sub
+                if hasattr(row, "issued_at") and "iat" in new_payload:
+                    row.issued_at = datetime.fromtimestamp(new_payload["iat"], tz=timezone.utc)
+                if hasattr(row, "expires_at") and "exp" in new_payload:
+                    row.expires_at = datetime.fromtimestamp(new_payload["exp"], tz=timezone.utc)
+                db.add(row)
+            db.commit()
+    except Exception:
+        pass
 
-    access = create_access_token(sub=user.id, tenant=t_claim)
-    return {"access_token": access, "token_type": "bearer"}
+    return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
 
 @router.post("/logout")
 def logout(
-    token: str = Body(..., embed=True),  # envie o REFRESH token aqui
+    token: str | None = Body(default=None, embed=True),
+    token_q: str | None = Query(default=None, alias="token"),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
-    _ = Depends(get_current_user_scoped),  # exige estar autenticado (access)
 ):
-    payload = decode_refresh(token)
-    if not payload:
-        raise HTTPException(status_code=400, detail="Refresh inválido")
-    t_claim = str(payload.get("tenant"))
-    if t_claim not in {str(tenant.id), tenant.slug}:
-        raise HTTPException(status_code=401, detail="Tenant mismatch")
-
-    jti = payload.get("jti")
-    if not jti:
-        raise HTTPException(status_code=400, detail="Refresh inválido")
-
-    res = db.execute(
-        _UPD_REVOKE_BY_JTI,
-        {"now": _utcnow(), "jti": jti, "tenant_slug": t_claim},
-    )
-    db.commit()
-    return {"revoked": bool(res.rowcount)}
-
-@router.post("/logout-all")
-def logout_all(
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-    user = Depends(get_current_user_scoped),
-):
-    t_claim = tenant.slug or str(tenant.id)
-    res = db.execute(
-        _UPD_REVOKE_ALL,
-        {"now": _utcnow(), "email": user.email, "tenant_slug": t_claim},
-    )
-    db.commit()
-    return {"revoked_count": int(res.rowcount or 0)}
-
-@router.post("/users", response_model=UserSchema, status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_roles(ROLE_ADMIN))])
-def create_user(
-    body: UserCreate,
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-    _ = Depends(get_current_user_scoped),
-):
-    exists = db.execute(
-        select(User).where(User.email == body.email, User.client_id == tenant.id)
-    ).scalar_one_or_none()
-    if exists:
-        raise HTTPException(status_code=409, detail="E-mail já cadastrado neste cliente")
-
-    user = User(
-        client_id=tenant.id,
-        name=body.name,
-        email=body.email,
-        hashed_password=hash_password(body.password),
-        status=body.status or "active",
-    )
-    db.add(user); db.flush()
-
-    if body.role_names:
-        roles = db.scalars(select(Role).where(Role.name.in_(body.role_names))).all()
-        for r in roles:
-            user.roles.append(r)
-
-    db.commit(); db.refresh(user)
-    return UserSchema(
-        id=user.id,
-        client_id=user.client_id,
-        name=user.name,
-        email=user.email,
-        status=user.status,
-        roles=[r.name for r in user.roles],
-    )
-
-@router.get("/me", response_model=UserSchema)
-def read_me(user = Depends(get_current_user_scoped)):
-    return UserSchema(
-        id=user.id,
-        client_id=user.client_id,
-        name=user.name,
-        email=user.email,
-        status=user.status,
-        roles=[r.name for r in user.roles or []],
-    )
+    tok = _get_token_from_body_or_query(token, token_q)
+    payload = decode_refresh(tok)
+    if payload and payload.get("tenant") == tenant.slug and hasattr(RefreshToken, "jti") and "jti" in payload:
+        rt = db.execute(select(RefreshToken).where(RefreshToken.jti == payload["jti"])).scalar_one_or_none()
+        if rt and getattr(rt, "revoked_at", None) is None:
+            rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+            db.add(rt)
+            db.commit()
+    return {"ok": True}

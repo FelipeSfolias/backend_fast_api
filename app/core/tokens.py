@@ -8,57 +8,69 @@ from typing import Any, Dict, Optional
 from jose import jwt, JWTError
 from app.core.config import settings
 
-ALGO = settings.ALGORITHM
+# Compatível com teu Settings: usa JWT_ALGORITHM se existir; senão "HS256"
+ALGO = getattr(settings, "JWT_ALGORITHM", "HS256")
 
-def _utcnow() -> datetime:
+def _now() -> datetime:
     return datetime.now(timezone.utc)
 
-def _exp_minutes(minutes: int) -> int:
-    return int((_utcnow() + timedelta(minutes=minutes)).timestamp())
+def _exp(minutes: int = 15) -> datetime:
+    return _now() + timedelta(minutes=minutes)
 
-def _exp_days(days: int) -> int:
-    return int((_utcnow() + timedelta(days=days)).timestamp())
+def _exp_days(days: int) -> datetime:
+    return _now() + timedelta(days=days)
 
-def create_access_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any]] = None) -> str:
+def create_access_token(*, sub: str, tenant: str, scope: str = "") -> str:
+    """Access token curto (minutos), assinado com SECRET_KEY."""
+    expire_min = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 30))
     payload: Dict[str, Any] = {
-        "jti": uuid.uuid4().hex,
         "type": "access",
-        "sub": int(sub),
-        "tenant": str(tenant),
-        "exp": _exp_minutes(settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-        "iat": int(_utcnow().timestamp()),
+        "sub": sub,
+        "tenant": tenant,
+        "scope": scope,
+        "jti": uuid.uuid4().hex,
+        "iat": int(_now().timestamp()),
+        "exp": int(_exp(expire_min).timestamp()),
     }
-    if extra:
-        payload.update(extra)
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGO)
 
-def create_refresh_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any]] = None) -> str:
+def create_refresh_token(*, sub: str, tenant: str, scope: str = "") -> str:
+    """Refresh longo (dias), também assinado com SECRET_KEY (como no teu projeto)."""
+    expire_days = int(getattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", 7))
     payload: Dict[str, Any] = {
-        "jti": uuid.uuid4().hex,
         "type": "refresh",
-        "sub": int(sub),
-        "tenant": str(tenant),
-        "exp": _exp_days(settings.REFRESH_TOKEN_EXPIRE_DAYS),
-        "iat": int(_utcnow().timestamp()),
+        "sub": sub,
+        "tenant": tenant,
+        "scope": scope,
+        "jti": uuid.uuid4().hex,
+        "iat": int(_now().timestamp()),
+        "exp": int(_exp_days(expire_days).timestamp()),
     }
-    if extra:
-        payload.update(extra)
-    return jwt.encode(payload, settings.REFRESH_SECRET_KEY, algorithm=ALGO)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGO)
+
+def decode_refresh(token: str) -> Optional[Dict[str, Any]]:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGO])
+    except JWTError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "refresh":
+        return None
+    # exigidos pelo teu fluxo
+    if not payload.get("sub") or not payload.get("tenant") or not payload.get("jti"):
+        return None
+    return payload
 
 def decode_access(token: str) -> Optional[Dict[str, Any]]:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGO])
     except JWTError:
         return None
-    if payload.get("type") != "access" or not payload.get("sub") or not payload.get("tenant"):
+    if not isinstance(payload, dict):
         return None
-    return payload
-
-def decode_refresh(token: str) -> Optional[Dict[str, Any]]:
-    try:
-        payload = jwt.decode(token, settings.REFRESH_SECRET_KEY, algorithms=[ALGO])
-    except JWTError:
+    if payload.get("type") != "access":
         return None
-    if payload.get("type") != "refresh" or not payload.get("sub") or not payload.get("tenant"):
+    if not payload.get("sub") or not payload.get("tenant"):
         return None
     return payload
