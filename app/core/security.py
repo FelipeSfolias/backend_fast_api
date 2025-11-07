@@ -1,29 +1,28 @@
-# core/security_password.py
-from __future__ import annotations
+# app/core/security.py
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+from jose import jwt
 from passlib.context import CryptContext
+from app.schemas.user import UserOut
+from app.api.permissions import Role
+from app.core.config import settings  # ajuste se necessário
 
-pwd_context = CryptContext(
-    # aceita hashes antigos em bcrypt; novo padrão é argon2id
-    schemes=["argon2", "bcrypt_sha256", "bcrypt"],
-    deprecated="auto",
-    # parâmetros razoáveis p/ server comum (ajuste se quiser endurecer):
-    argon2__time_cost=2,
-    argon2__memory_cost=19456,  # ~19 MB
-    argon2__parallelism=1,
-)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ALGORITHM = "HS256"
 
-def hash_password(plain: str) -> str:
-    # sem truncar: Argon2 não tem limite de 72 bytes
-    return pwd_context.hash(plain)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
-def verify_and_maybe_upgrade(plain: str, stored_hash: str) -> tuple[bool, str | None]:
-    """
-    Retorna (ok, new_hash_ou_None). Se a senha confere e o hash é 'antigo'
-    (ex.: bcrypt), devolve um novo hash em Argon2 para você salvar.
-    """
-    ok = pwd_context.verify(plain, stored_hash)
-    if not ok:
-        return False, None
-    if pwd_context.needs_update(stored_hash):
-        return True, pwd_context.hash(plain)
-    return True, None
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def create_access_token(*, user: UserOut, expires_delta: Optional[timedelta] = None) -> str:
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode = {
+        "sub": user.id,
+        "tenant_id": user.tenant_id,
+        "role": int(user.role),
+        "exp": int(expire.timestamp()),
+    }
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt

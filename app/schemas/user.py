@@ -1,19 +1,31 @@
+# app/schemas/user.py
+from typing import Optional
 from pydantic import BaseModel, EmailStr
-from typing import List
+from app.api.permissions import Role
 
 class UserBase(BaseModel):
-    name: str
     email: EmailStr
-    status: str = "active"
+    full_name: Optional[str] = None
+    is_active: bool = True
+    role: Role = Role.ALUNO
+    tenant_id: int
 
 class UserCreate(UserBase):
     password: str
-    role_names: List[str] = []
 
-class User(BaseModel):
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    is_active: Optional[bool] = None
+    role: Optional[Role] = None  # só Admin do Cliente deve poder mudar
+    # sem tenant_id aqui por segurança
+
+class UserOut(BaseModel):
     id: int
-    client_id: int
-    name: str
     email: EmailStr
-    status: str
-    roles: List[str]
+    full_name: Optional[str] = None
+    is_active: bool
+    role: Role
+    tenant_id: int
+
+    class Config:
+        from_attributes = True  # pydantic v2 (ajuste para orm_mode=True no v1)
