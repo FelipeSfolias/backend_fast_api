@@ -13,22 +13,22 @@ _RANK = {name: idx for idx, name in enumerate(_HIERARCHY)}
 def _user_role_names(user) -> set[str]:
     return {r.name for r in (user.roles or [])}
 
-def require_roles(*allowed: str):
-    allowed_set = set(allowed)
+def require_roles(*roles: str):
+    allowed = set(roles)
     def dep(user = Depends(get_current_user_scoped)):
         user_roles = _user_role_names(user)
-        if not (user_roles & allowed_set):
+        if not (user_roles & allowed):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role")
         return user
     return dep
 
 def require_min_role(min_role: str):
-    min_rank = _RANK.get(min_role, -1)
-    if min_rank < 0:
+    if min_role not in _RANK:
         raise RuntimeError(f"Unknown role: {min_role}")
+    need = _RANK[min_role]
     def dep(user = Depends(get_current_user_scoped)):
-        for n in _user_role_names(user):
-            if _RANK.get(n, -1) >= min_rank:
+        for r in _user_role_names(user):
+            if _RANK.get(r, -1) >= need:
                 return user
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role")
     return dep
