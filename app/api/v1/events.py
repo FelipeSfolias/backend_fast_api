@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Body, status
 from datetime import date, time
-from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 import sqlalchemy as sa
 
