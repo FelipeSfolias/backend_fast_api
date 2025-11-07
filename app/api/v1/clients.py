@@ -18,7 +18,7 @@ from app.schemas.client import (
 # Dois routers para evitar confusão de prefixo
 tenant_router = APIRouter()
 public_router = APIRouter()
-
+router = tenant_router
 # -------- helpers --------
 def _to_out(c: ClientModel) -> ClientOut:
     return ClientOut(
