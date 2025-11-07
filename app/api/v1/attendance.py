@@ -1,34 +1,51 @@
 # app/api/v1/attendance.py
-from typing import List
-from fastapi import APIRouter, Depends
+from __future__ import annotations
+
+from typing import List, Optional
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from app.api.deps import get_db, get_current_user_scoped
-from app.api.permissions import Role
-from app.schemas.user import UserOut
-from pydantic import BaseModel
+from app.api.deps import get_db, get_tenant, get_current_user_scoped
+from app.core.rbac import ROLE_ALUNO
+from app.models.attendance import Attendance as AttendanceModel
+from app.models.enrollment import Enrollment as EnrollmentModel
+from app.models.student import Student as StudentModel
+from app.schemas.attendance import Attendance as AttendanceOut
 
 router = APIRouter()
 
-class AttendanceOut(BaseModel):
-    id: int
-    enrollment_id: int
-    status: str
-
-    class Config:
-        from_attributes = True
+def _current_student_id(db: Session, tenant, user) -> Optional[int]:
+    st = db.execute(
+        select(StudentModel.id).where(
+            StudentModel.client_id == tenant.id,
+            StudentModel.email == user.email
+        )
+    ).scalar_one_or_none()
+    return st
 
 @router.get("/", response_model=List[AttendanceOut])
 def list_attendance(
     db: Session = Depends(get_db),
-    user: UserOut = Depends(get_current_user_scoped),
+    tenant = Depends(get_tenant),
+    user = Depends(get_current_user_scoped),
+    event_id: Optional[int] = Query(None),
 ):
-    # Se Aluno -> filtra por suas matrículas
-    # Se Portaria/Organizador/Admin -> pode ver geral
-    # Ajuste os modelos/joins conforme seu schema
-    if user.role == Role.ALUNO:
-        # exemplo: filtrar por enrollment.student_id == user.id
-        # ...
-        pass
-    # ...
-    return []
+    # base query: by tenant via join enrollment->student
+    stmt = (
+        select(AttendanceModel)
+        .join(EnrollmentModel, EnrollmentModel.id == AttendanceModel.enrollment_id)
+        .join(StudentModel, StudentModel.id == EnrollmentModel.student_id)
+        .where(StudentModel.client_id == tenant.id)
+    )
+    if event_id is not None:
+        stmt = stmt.where(EnrollmentModel.event_id == event_id)
+
+    role_names = {r.name for r in user.roles or []}
+    if ROLE_ALUNO in role_names:
+        my_sid = _current_student_id(db, tenant, user)
+        if not my_sid:
+            return []
+        stmt = stmt.where(EnrollmentModel.student_id == my_sid)
+
+    rows = db.execute(stmt).scalars().all()
+    return rows

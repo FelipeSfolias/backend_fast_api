@@ -5,95 +5,51 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from jose import jwt, JWTError  # python-jose
+from jose import jwt, JWTError
 from app.core.config import settings
 
-# Ajuste os nomes conforme seu settings
-# settings.SECRET_KEY
-# settings.ACCESS_TOKEN_EXPIRE_MINUTES
-# settings.REFRESH_TOKEN_EXPIRE_DAYS
-# settings.JWT_ALGORITHM
+ALGO = settings.ALGORITHM
 
-ALGO = getattr(settings, "JWT_ALGORITHM", "HS256")
-
-def _now() -> datetime:
+def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def _exp(minutes: int = 15) -> datetime:
-    return _now() + timedelta(minutes=minutes)
+def _exp(minutes: int) -> int:
+    return int((_utcnow() + timedelta(minutes=minutes)).timestamp())
 
-def _exp_days(days: int) -> datetime:
-    return _now() + timedelta(days=days)
+def _rexp(days: int) -> int:
+    return int((_utcnow() + timedelta(days=days)).timestamp())
 
-def create_access_token(*, sub: str, tenant: str, scope: str = "") -> str:
-    """
-    Gera JWT de acesso com:
-      - type=access
-      - sub=<identificador do usuário> (email ou id, conforme seu uso)
-      - tenant=<slug>
-      - scope=<opcional>
-    """
-    expire_min = int(getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+def create_access_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any]] = None) -> str:
     payload: Dict[str, Any] = {
+        "jti": uuid.uuid4().hex,
         "type": "access",
-        "sub": sub,
-        "tenant": tenant,
-        "scope": scope,
-        "iat": int(_now().timestamp()),
-        "exp": int(_exp(expire_min).timestamp()),
+        "sub": int(sub),
+        "tenant": str(tenant),
+        "exp": _exp(settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        "iat": int(_utcnow().timestamp()),
     }
+    if extra:
+        payload.update(extra)
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGO)
 
-def create_refresh_token(*, sub: str, tenant: str, scope: str = "") -> str:
-    """
-    Gera JWT de refresh com:
-      - type=refresh
-      - jti=<uuid4>
-      - exp longo (ex.: 30 dias)
-    """
-    expire_days = int(getattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", 30))
+def create_refresh_token(*, sub: int, tenant: str, extra: Optional[Dict[str, Any]] = None) -> str:
     payload: Dict[str, Any] = {
+        "jti": uuid.uuid4().hex,
         "type": "refresh",
-        "sub": sub,
-        "tenant": tenant,
-        "scope": scope,
-        "jti": str(uuid.uuid4()),
-        "iat": int(_now().timestamp()),
-        "exp": int(_exp_days(expire_days).timestamp()),
+        "sub": int(sub),
+        "tenant": str(tenant),
+        "exp": _rexp(settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        "iat": int(_utcnow().timestamp()),
     }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGO)
-
-def decode_refresh(token: str) -> Optional[Dict[str, Any]]:
-    """
-    Decodifica o JWT e retorna o payload SOMENTE se:
-      - assinatura/exp ok
-      - type == 'refresh'
-    Senão, retorna None.
-    """
-    try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGO])
-    except JWTError:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("type") != "refresh":
-        return None
-    # sub, tenant e jti são esperados
-    if not payload.get("sub") or not payload.get("tenant") or not payload.get("jti"):
-        return None
-    return payload
+    if extra:
+        payload.update(extra)
+    return jwt.encode(payload, settings.REFRESH_SECRET_KEY, algorithm=ALGO)
 
 def decode_access(token: str) -> Optional[Dict[str, Any]]:
-    """
-    Decodifica um access token e retorna o payload se for válido e do tipo 'access'.
-    Caso contrário, retorna None.
-    """
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGO])
     except JWTError:
         return None
-
     if not isinstance(payload, dict):
         return None
     if payload.get("type") != "access":
@@ -102,3 +58,15 @@ def decode_access(token: str) -> Optional[Dict[str, Any]]:
         return None
     return payload
 
+def decode_refresh(token: str) -> Optional[Dict[str, Any]]:
+    try:
+        payload = jwt.decode(token, settings.REFRESH_SECRET_KEY, algorithms=[ALGO])
+    except JWTError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") != "refresh":
+        return None
+    if not payload.get("sub") or not payload.get("tenant"):
+        return None
+    return payload
