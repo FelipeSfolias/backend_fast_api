@@ -1,7 +1,8 @@
 # app/api/v1/clients.py
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import re
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -10,13 +11,15 @@ from app.core.rbac import require_roles
 from app.models.client import Client as ClientModel
 from app.schemas.client import (
     Client as ClientOut,
-    ClientBase,       # já existe no seu ZIP
-    ClientUpdate,     # já existe no seu ZIP
+    ClientBase,
+    ClientUpdate,
 )
 
-router = APIRouter()
+# Dois routers para evitar confusão de prefixo
+tenant_router = APIRouter()
+public_router = APIRouter()
 
-# Utilitário para padronizar a resposta
+# -------- helpers --------
 def _to_out(c: ClientModel) -> ClientOut:
     return ClientOut(
         id=c.id,
@@ -32,14 +35,18 @@ def _to_out(c: ClientModel) -> ClientOut:
         config_json=c.config_json,
     )
 
-@router.get("/_debug/tenants")
-def list_tenants(db: Session = Depends(get_db)):
-    rows = db.execute(select(ClientModel.id, ClientModel.slug, ClientModel.name)).all()
-    return [{"id": r.id, "slug": r.slug, "name": r.name} for r in rows]
+_slug_re = re.compile(r"[^a-z0-9\-]")
 
-# ----- GET do cliente do tenant (aceita com e sem barra final) -----
-@router.get("", response_model=ClientOut)
-@router.get("/", response_model=ClientOut)
+def _normalize_slug(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace(" ", "-")
+    s = _slug_re.sub("", s)
+    return s
+
+# -------- tenant-scoped --------
+
+@tenant_router.get("", response_model=ClientOut)
+@tenant_router.get("/", response_model=ClientOut)
 def get_my_client(
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
@@ -50,9 +57,8 @@ def get_my_client(
         raise HTTPException(status_code=404, detail="Client not found")
     return _to_out(c)
 
-# ----- PUT (update) do cliente do tenant — exige admin -----
-@router.put("", response_model=ClientOut, dependencies=[Depends(require_roles("admin"))])
-@router.put("/", response_model=ClientOut, dependencies=[Depends(require_roles("admin"))])
+@tenant_router.put("", response_model=ClientOut, dependencies=[Depends(require_roles("admin"))])
+@tenant_router.put("/", response_model=ClientOut, dependencies=[Depends(require_roles("admin"))])
 def update_my_client(
     body: ClientUpdate,
     db: Session = Depends(get_db),
@@ -72,16 +78,21 @@ def update_my_client(
     db.refresh(c)
     return _to_out(c)
 
-# ----- POST para criar um novo Client (sem tenant no path) -----
-# OBS: este endpoint também ficará disponível em /{tenant}/client por causa da dupla inclusão do router,
-# mas o uso recomendado é via /api/v1/client (sem tenant). Não exige auth (ajuste se quiser).
-@router.post("", response_model=ClientOut)
+# -------- público (provisionamento) --------
+
+@public_router.post("", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
+@public_router.post("/", response_model=ClientOut, status_code=status.HTTP_201_CREATED)
 def create_client(
     body: ClientBase,
     db: Session = Depends(get_db),
 ):
+    # normaliza slug (minúsculo, sem espaços e sem chars inválidos)
+    body.slug = _normalize_slug(body.slug)
+
     # slug único
-    exists = db.execute(select(ClientModel).where(ClientModel.slug == body.slug)).scalar_one_or_none()
+    exists = db.execute(
+        select(ClientModel).where(ClientModel.slug == body.slug)
+    ).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=409, detail="Slug já existe")
 
@@ -101,3 +112,9 @@ def create_client(
     db.commit()
     db.refresh(c)
     return _to_out(c)
+
+# ------- debug opcional -------
+@public_router.get("/_debug/tenants")
+def list_tenants(db: Session = Depends(get_db)):
+    rows = db.execute(select(ClientModel.id, ClientModel.slug, ClientModel.name)).all()
+    return [{"id": r.id, "slug": r.slug, "name": r.name} for r in rows]
