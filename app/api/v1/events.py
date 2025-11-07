@@ -15,6 +15,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Body, status
 from datetime import date, time
+from __future__ import annotations
+from fastapi import APIRouter, Depends, HTTPException, Query, Path
+import sqlalchemy as sa
 
 
 router = APIRouter()
@@ -107,21 +110,74 @@ def update_event(
     )
 
 
-# substitua o SEU @router.delete("/events/{event_id}", ...) por este:
-@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin","organizer"))])
+@router.delete("/{event_id}", dependencies=[Depends(require_roles("admin", "organizer"))])
 def delete_event(
-    event_id: int,
+    event_id: int = Path(..., ge=1),
+    force: bool = Query(False, description="Se true, apaga em cascata vínculos (inscrições, presenças etc.)"),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
     _ = Depends(get_current_user_scoped),
 ):
-    e = db.get(EventModel, event_id)
-    if not e or e.client_id != tenant.id:
-        raise HTTPException(status_code=404, detail="Evento não encontrado")
+    # 1) evento do tenant?
+    ev = db.execute(
+        select(Event).where(Event.id == event_id, Event.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
 
-    db.delete(e)
+    # 2) se não for force, checa refs e bloqueia com 409 amigável
+    if not force:
+        has_refs = db.execute(sa.text("""
+            SELECT
+              EXISTS (SELECT 1 FROM enrollments WHERE event_id = :e) OR
+              EXISTS (SELECT 1 FROM day_events  WHERE event_id = :e)
+        """), {"e": event_id}).scalar()
+        if has_refs:
+            raise HTTPException(
+                status_code=409,
+                detail="Evento possui inscrições ou dias associados. Use ?force=1 para apagar em cascata."
+            )
+
+    # 3) cascade manual (ordem importa). Usa SQL Core pra não depender de todos os models.
+    params = {"e": event_id, "c": tenant.id}
+
+    # attendances via enrollment ou via day_event
+    res_att = db.execute(sa.text("""
+        DELETE FROM attendances
+        WHERE enrollment_id IN (SELECT id FROM enrollments WHERE event_id = :e)
+           OR day_event_id IN (SELECT id FROM day_events  WHERE event_id = :e)
+    """), params)
+
+    # certificates das inscrições do evento
+    res_cert = db.execute(sa.text("""
+        DELETE FROM certificates
+        USING enrollments
+        WHERE certificates.enrollment_id = enrollments.id
+          AND enrollments.event_id = :e
+    """), params)
+
+    # enrollments do evento
+    res_enr = db.execute(sa.text("DELETE FROM enrollments WHERE event_id = :e"), params)
+
+    # day_events do evento
+    res_days = db.execute(sa.text("DELETE FROM day_events WHERE event_id = :e"), params)
+
+    # finalmente, o próprio evento (scoped ao tenant)
+    res_evt = db.execute(sa.text("DELETE FROM events WHERE id = :e AND client_id = :c"), params)
+
     db.commit()
-    return None  # 204
+
+    return {
+        "deleted": bool(res_evt.rowcount),
+        "cascade": force,
+        "counts": {
+            "attendances": int(res_att.rowcount or 0),
+            "certificates": int(res_cert.rowcount or 0),
+            "enrollments": int(res_enr.rowcount or 0),
+            "day_events": int(res_days.rowcount or 0),
+            "events": int(res_evt.rowcount or 0),
+        },
+    }
 
 @router.put("/{event_id}/days/{day_id}",
             response_model=DayEvent,
