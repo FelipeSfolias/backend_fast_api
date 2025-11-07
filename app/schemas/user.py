@@ -1,31 +1,37 @@
 # app/schemas/user.py
-from typing import Optional
+from __future__ import annotations
+from typing import Optional, List
 from pydantic import BaseModel, EmailStr
-from app.api.permissions import Role
 
+# v2: from_attributes; v1: orm_mode=True (se estiver em Pydantic v1, troque as Configs)
 class UserBase(BaseModel):
+    name: str
     email: EmailStr
-    full_name: Optional[str] = None
-    is_active: bool = True
-    role: Role = Role.ALUNO
-    tenant_id: int
+    status: str = "active"
 
-class UserCreate(UserBase):
+class UserCreate(BaseModel):
+    name: str
+    email: EmailStr
     password: str
+    status: Optional[str] = "active"
+    # nomes de papéis a vincular (ex.: ["admin"], ["organizer","portaria"], etc.)
+    role_names: Optional[List[str]] = None
 
 class UserUpdate(BaseModel):
-    full_name: Optional[str] = None
-    is_active: Optional[bool] = None
-    role: Optional[Role] = None  # só Admin do Cliente deve poder mudar
-    # sem tenant_id aqui por segurança
+    name: Optional[str] = None
+    status: Optional[str] = None
+    role_names: Optional[List[str]] = None
 
-class UserOut(BaseModel):
+class User(BaseModel):
     id: int
+    client_id: int
+    name: str
     email: EmailStr
-    full_name: Optional[str] = None
-    is_active: bool
-    role: Role
-    tenant_id: int
+    status: str
+    roles: List[str] = []
 
     class Config:
-        from_attributes = True  # pydantic v2 (ajuste para orm_mode=True no v1)
+        from_attributes = True
+
+# Compatibilidade com código legado que importava UserOut
+UserOut = User

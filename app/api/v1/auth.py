@@ -8,13 +8,12 @@ from sqlalchemy import select
 
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
-from app.core.security_password import verify_and_maybe_upgrade
-from app.core.security import hash_password
-from app.core.rbac import require_roles
+from app.core.security import verify_and_maybe_upgrade, hash_password
+from app.core.rbac import require_roles, ROLE_ADMIN
 
 from app.models.user import User
 from app.models.role import Role
-from app.schemas.user import UserCreate, User as UserOut
+from app.schemas.user import UserCreate, User as UserSchema
 
 router = APIRouter()
 
@@ -29,6 +28,7 @@ def login_for_access_token(
     ).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos")
+
     ok, new_hash = verify_and_maybe_upgrade(form.password, user.hashed_password)
     if not ok:
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos")
@@ -52,22 +52,26 @@ def refresh_access_token(
         raise HTTPException(status_code=401, detail="Refresh inválido ou expirado")
     if str(payload.get("tenant")) not in {str(tenant.id), tenant.slug}:
         raise HTTPException(status_code=401, detail="Tenant mismatch")
+
     user = db.get(User, int(payload["sub"]))
     if not user or user.client_id != tenant.id:
         raise HTTPException(status_code=401, detail="User not found")
+
     tenant_claim = tenant.slug or str(tenant.id)
     access = create_access_token(sub=user.id, tenant=tenant_claim)
     return {"access_token": access, "token_type": "bearer"}
 
-@router.post("/users", response_model=UserOut, status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_roles("admin"))])
+@router.post("/users", response_model=UserSchema, status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(require_roles(ROLE_ADMIN))])
 def create_user(
     body: UserCreate,
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
     _ = Depends(get_current_user_scoped),
 ):
-    exists = db.execute(select(User).where(User.email == body.email, User.client_id == tenant.id)).scalar_one_or_none()
+    exists = db.execute(
+        select(User).where(User.email == body.email, User.client_id == tenant.id)
+    ).scalar_one_or_none()
     if exists:
         raise HTTPException(status_code=409, detail="E-mail já cadastrado neste cliente")
 
@@ -78,26 +82,26 @@ def create_user(
         hashed_password=hash_password(body.password),
         status=body.status or "active",
     )
-    db.add(user); db.commit(); db.refresh(user)
+    db.add(user); db.flush()
 
-    for rname in (body.role_names or []):
-        role = db.execute(select(Role).where(Role.name == rname)).scalar_one_or_none()
-        if role:
-            user.roles.append(role)
+    if body.role_names:
+        roles = db.scalars(select(Role).where(Role.name.in_(body.role_names))).all()
+        for r in roles:
+            user.roles.append(r)
+
     db.commit(); db.refresh(user)
-
-    return UserOut(
+    return UserSchema(
         id=user.id,
         client_id=user.client_id,
         name=user.name,
         email=user.email,
         status=user.status,
-        roles=[r.name for r in user.roles or []],
+        roles=[r.name for r in user.roles],
     )
 
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=UserSchema)
 def read_me(user = Depends(get_current_user_scoped)):
-    return UserOut(
+    return UserSchema(
         id=user.id,
         client_id=user.client_id,
         name=user.name,
