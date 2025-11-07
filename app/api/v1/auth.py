@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Body, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from sqlalchemy import select, update
+from sqlalchemy import select
+import sqlalchemy as sa
 
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
@@ -14,13 +15,59 @@ from app.core.rbac import require_roles, ROLE_ADMIN
 
 from app.models.user import User
 from app.models.role import Role
-from app.models.refresh_token import RefreshToken
 from app.schemas.user import UserCreate, User as UserSchema
 
 router = APIRouter()
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+# ---------- helpers (SQL Core) ----------
+
+_INS_REFRESH = sa.text("""
+    INSERT INTO refresh_tokens (jti, user_email, tenant_slug, expires_at, revoked_at)
+    VALUES (:jti, :user_email, :tenant_slug, :expires_at, NULL)
+    ON CONFLICT (jti) DO NOTHING
+""").bindparams(
+    sa.bindparam("jti", type_=sa.String(64)),
+    sa.bindparam("user_email", type_=sa.String(160)),
+    sa.bindparam("tenant_slug", type_=sa.String(64)),
+    sa.bindparam("expires_at", type_=sa.DateTime(timezone=True)),
+)
+
+_SEL_REFRESH_BY_JTI = sa.text("""
+    SELECT jti, user_email, tenant_slug, expires_at, revoked_at
+    FROM refresh_tokens
+    WHERE jti = :jti
+""").bindparams(
+    sa.bindparam("jti", type_=sa.String(64))
+)
+
+_UPD_REVOKE_BY_JTI = sa.text("""
+    UPDATE refresh_tokens
+    SET revoked_at = :now
+    WHERE jti = :jti
+      AND revoked_at IS NULL
+      AND tenant_slug = :tenant_slug
+""").bindparams(
+    sa.bindparam("now", type_=sa.DateTime(timezone=True)),
+    sa.bindparam("jti", type_=sa.String(64)),
+    sa.bindparam("tenant_slug", type_=sa.String(64)),
+)
+
+_UPD_REVOKE_ALL = sa.text("""
+    UPDATE refresh_tokens
+    SET revoked_at = :now
+    WHERE user_email = :email
+      AND tenant_slug = :tenant_slug
+      AND revoked_at IS NULL
+""").bindparams(
+    sa.bindparam("now", type_=sa.DateTime(timezone=True)),
+    sa.bindparam("email", type_=sa.String(160)),
+    sa.bindparam("tenant_slug", type_=sa.String(64)),
+)
+
+# ---------- endpoints ----------
 
 @router.post("/login")
 def login_for_access_token(
@@ -46,20 +93,21 @@ def login_for_access_token(
     access = create_access_token(sub=user.id, tenant=tenant_claim)
     refresh = create_refresh_token(sub=user.id, tenant=tenant_claim)
 
-    # Persistir refresh no DB (para revogação e auditoria)
+    # persistir refresh (para validar/ revogar depois)
     payload = decode_refresh(refresh)
     if not payload:
         raise HTTPException(status_code=500, detail="Falha ao assinar o refresh token")
     jti = payload["jti"]
     exp_ts = int(payload["exp"])
-
-    db.add(RefreshToken(
-        jti=jti,
-        user_email=user.email,
-        tenant_slug=tenant_claim,
-        expires_at=datetime.fromtimestamp(exp_ts, tz=timezone.utc),
-        revoked_at=None,
-    ))
+    db.execute(
+        _INS_REFRESH,
+        {
+            "jti": jti,
+            "user_email": user.email,
+            "tenant_slug": tenant_claim,
+            "expires_at": datetime.fromtimestamp(exp_ts, tz=timezone.utc),
+        },
+    )
     db.commit()
 
     return {"access_token": access, "refresh_token": refresh, "token_type": "bearer"}
@@ -74,26 +122,28 @@ def refresh_access_token(
     if not payload:
         raise HTTPException(status_code=401, detail="Refresh inválido ou expirado")
 
-    # valida escopo tenant
     t_claim = str(payload.get("tenant"))
     if t_claim not in {str(tenant.id), tenant.slug}:
         raise HTTPException(status_code=401, detail="Tenant mismatch")
 
-    # valida no DB (existência, tenant, não revogado, não expirado)
     jti = payload.get("jti")
     if not jti:
         raise HTTPException(status_code=401, detail="Refresh inválido")
-    rt = db.execute(select(RefreshToken).where(RefreshToken.jti == jti)).scalar_one_or_none()
-    if not rt or rt.tenant_slug not in {tenant.slug, str(tenant.id)}:
+
+    row = db.execute(_SEL_REFRESH_BY_JTI, {"jti": jti}).mappings().first()
+    if not row:
         raise HTTPException(status_code=401, detail="Refresh não encontrado")
-    if rt.revoked_at is not None:
+    if row["tenant_slug"] != t_claim:
+        raise HTTPException(status_code=401, detail="Tenant mismatch")
+    if row["revoked_at"] is not None:
         raise HTTPException(status_code=401, detail="Refresh revogado")
-    if rt.expires_at <= _utcnow():
+    if row["expires_at"] <= _utcnow():
         raise HTTPException(status_code=401, detail="Refresh expirado")
 
-    # (opcional) checa usuário
-    user = db.get(User, int(payload["sub"]))
-    if not user or user.client_id != tenant.id:
+    user = db.execute(
+        select(User).where(User.id == int(payload["sub"]), User.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not user:
         raise HTTPException(status_code=401, detail="User not found")
 
     access = create_access_token(sub=user.id, tenant=t_claim)
@@ -104,29 +154,25 @@ def logout(
     token: str = Body(..., embed=True),  # envie o REFRESH token aqui
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
-    _ = Depends(get_current_user_scoped),  # exige estar logado com access token
+    _ = Depends(get_current_user_scoped),  # exige estar autenticado (access)
 ):
     payload = decode_refresh(token)
     if not payload:
         raise HTTPException(status_code=400, detail="Refresh inválido")
-    if str(payload.get("tenant")) not in {str(tenant.id), tenant.slug}:
+    t_claim = str(payload.get("tenant"))
+    if t_claim not in {str(tenant.id), tenant.slug}:
         raise HTTPException(status_code=401, detail="Tenant mismatch")
 
     jti = payload.get("jti")
     if not jti:
         raise HTTPException(status_code=400, detail="Refresh inválido")
 
-    upd = (
-        update(RefreshToken)
-        .where(RefreshToken.jti == jti, RefreshToken.tenant_slug.in_([tenant.slug, str(tenant.id)]))
-        .values(revoked_at=_utcnow())
+    res = db.execute(
+        _UPD_REVOKE_BY_JTI,
+        {"now": _utcnow(), "jti": jti, "tenant_slug": t_claim},
     )
-    res = db.execute(upd)
     db.commit()
-    if res.rowcount == 0:
-        # nada para revogar (já revogado ou inexistente)
-        return {"revoked": False}
-    return {"revoked": True}
+    return {"revoked": bool(res.rowcount)}
 
 @router.post("/logout-all")
 def logout_all(
@@ -134,18 +180,13 @@ def logout_all(
     tenant = Depends(get_tenant),
     user = Depends(get_current_user_scoped),
 ):
-    upd = (
-        update(RefreshToken)
-        .where(
-            RefreshToken.user_email == user.email,
-            RefreshToken.tenant_slug.in_([tenant.slug, str(tenant.id)]),
-            RefreshToken.revoked_at.is_(None),
-        )
-        .values(revoked_at=_utcnow())
+    t_claim = tenant.slug or str(tenant.id)
+    res = db.execute(
+        _UPD_REVOKE_ALL,
+        {"now": _utcnow(), "email": user.email, "tenant_slug": t_claim},
     )
-    res = db.execute(upd)
     db.commit()
-    return {"revoked_count": res.rowcount or 0}
+    return {"revoked_count": int(res.rowcount or 0)}
 
 @router.post("/users", response_model=UserSchema, status_code=status.HTTP_201_CREATED,
              dependencies=[Depends(require_roles(ROLE_ADMIN))])
