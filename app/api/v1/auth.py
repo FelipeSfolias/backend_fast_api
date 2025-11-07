@@ -1,17 +1,20 @@
 # app/api/v1/auth.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Body, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 import sqlalchemy as sa
+from jose import jwt
 
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
+from app.core.tokens import create_access_token, decode_refresh  # usamos só o decode no /refresh
 from app.core.security import verify_and_maybe_upgrade, hash_password
 from app.core.rbac import require_roles, ROLE_ADMIN
+from app.core.config import settings
 
 from app.models.user import User
 from app.models.role import Role
@@ -22,8 +25,7 @@ router = APIRouter()
 def _utcnow():
     return datetime.now(timezone.utc)
 
-# ---------- helpers (SQL Core) ----------
-
+# ---------- SQL helpers (Core) ----------
 _INS_REFRESH = sa.text("""
     INSERT INTO refresh_tokens (jti, user_email, tenant_slug, expires_at, revoked_at)
     VALUES (:jti, :user_email, :tenant_slug, :expires_at, NULL)
@@ -68,7 +70,6 @@ _UPD_REVOKE_ALL = sa.text("""
 )
 
 # ---------- endpoints ----------
-
 @router.post("/login")
 def login_for_access_token(
     form: OAuth2PasswordRequestForm = Depends(),
@@ -90,22 +91,31 @@ def login_for_access_token(
 
     tenant_claim = tenant.slug or str(tenant.id)
 
+    # access token normal
     access = create_access_token(sub=user.id, tenant=tenant_claim)
-    refresh = create_refresh_token(sub=user.id, tenant=tenant_claim)
 
-    # persistir refresh (para validar/ revogar depois)
-    payload = decode_refresh(refresh)
-    if not payload:
-        raise HTTPException(status_code=500, detail="Falha ao assinar o refresh token")
-    jti = payload["jti"]
-    exp_ts = int(payload["exp"])
+    # ----- refresh token sem "auto-decode": montamos payload e assinamos -----
+    now = _utcnow()
+    jti = uuid.uuid4().hex
+    exp_at = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    payload_refresh = {
+        "jti": jti,
+        "type": "refresh",
+        "sub": int(user.id),
+        "tenant": str(tenant_claim),
+        "exp": int(exp_at.timestamp()),
+        "iat": int(now.timestamp()),
+    }
+    refresh = jwt.encode(payload_refresh, settings.REFRESH_SECRET_KEY, algorithm=settings.ALGORITHM)
+
+    # Persistimos usando os MESMOS valores (sem decodificar)
     db.execute(
         _INS_REFRESH,
         {
             "jti": jti,
             "user_email": user.email,
             "tenant_slug": tenant_claim,
-            "expires_at": datetime.fromtimestamp(exp_ts, tz=timezone.utc),
+            "expires_at": exp_at,
         },
     )
     db.commit()
