@@ -8,6 +8,13 @@ from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 from app.db.session import engine, SessionLocal
 from app.db.base import Base
+import os
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from app.core.config import settings
+
+
+app = FastAPI(title="Eventos API")
 
 from app.db.bootstrap import run_migrations_and_seed  # <- AQUI (não de init_db)
 from app.api.v1.router import api_router
@@ -71,3 +78,10 @@ def handle_unexpected(request: Request, exc: Exception):
         status_code=500,
         content={"code":"INTERNAL_ERROR","message":"Erro interno.","details":str(exc)}
     )
+    
+
+static_root = os.path.join(settings.DATA_DIR, "public")
+os.makedirs(static_root, exist_ok=True)
+app.mount("/static", StaticFiles(directory=static_root), name="static")
+
+app.include_router(api_router, prefix="/api/v1")
