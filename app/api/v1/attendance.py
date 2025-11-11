@@ -18,6 +18,7 @@ from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.models.attendance import Attendance
 from app.models.enrollment import Enrollment
 import datetime as dt
+from app.api.v1.users import require_roles
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ class CheckIn(BaseModel):
     day_event_id: int
     origin: str | None = "manual"
 
-@router.post("/checkin")
+@router.post("/checkin",  dependencies=[Depends(require_roles("portaria","organizer","admin"))])
 def checkin(
     payload: CheckIn,
     tenant = Depends(get_tenant),
@@ -63,8 +64,8 @@ def checkin(
 class CheckOut(BaseModel):
     enrollment_id: int
     day_event_id: int
-
-@router.post("/checkout")
+    
+@router.post("/checkout", dependencies=[Depends(require_roles("portaria","organizer","admin"))])
 def checkout(
     payload: CheckOut,
     tenant = Depends(get_tenant),

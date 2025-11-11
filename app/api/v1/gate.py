@@ -7,7 +7,7 @@ from sqlalchemy import select
 from pydantic import BaseModel
 import datetime as dt
 from zoneinfo import ZoneInfo
-
+from app.api.v1.users import require_roles
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.config import settings
 from app.models.enrollment import Enrollment as EnrollmentModel
@@ -59,7 +59,7 @@ def _window_utc(day: DayModel):
             end_local.astimezone(dt.timezone.utc))
 
 
-@router.post("/scan")
+@router.post("/scan", dependencies=[Depends(require_roles("portaria","organizer","admin"))])
 def scan(
     body: ScanIn = Body(...),
     db: Session = Depends(get_db),
@@ -119,7 +119,7 @@ def scan(
 
 
 # GET de debug para conferir o registro salvo
-@router.get("/attendance/{enrollment_id}/{day_event_id}")
+@router.get("/attendance/{enrollment_id}/{day_event_id}", dependencies=[Depends(require_roles("portaria","organizer","admin"))])
 def get_attendance(
     enrollment_id: int,
     day_event_id: int,

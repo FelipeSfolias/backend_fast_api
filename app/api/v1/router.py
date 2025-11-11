@@ -10,6 +10,7 @@ from app.api.v1 import (
     attendance,
     certificates,
     clients,
+    users,
 )
 
 api_router = APIRouter()
@@ -26,6 +27,6 @@ api_router.include_router(gate.router,         prefix="/{tenant}/gate",         
 api_router.include_router(attendance.router,   prefix="/{tenant}/attendance",   tags=["attendance"])
 api_router.include_router(certificates.router, prefix="/{tenant}/certificates", tags=["certificates"])
 api_router.include_router(clients.router,      prefix="/{tenant}/client",       tags=["client"])
-
+api_router.include_router(users.router, prefix="/{tenant}/users", tags=["users"])
 # debug opcional para listar tenants sem escopo
 api_router.include_router(clients.router,      prefix="/client",                tags=["client-debug"])

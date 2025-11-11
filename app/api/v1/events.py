@@ -24,7 +24,7 @@ def list_events(db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Dep
     rows = db.execute(select(EventModel).where(EventModel.client_id==tenant.id)).scalars().all()
     return [Event(id=e.id, client_id=e.client_id, **{k:getattr(e,k) for k in ("title","description","venue","capacity_total","workload_hours","min_presence_pct","start_at","end_at","status")}) for e in rows]
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(require_roles("organizer","admin"))])
 def create_event(body: EventCreate, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
     e = event_crud.create(db, body, extra={"client_id": tenant.id})
     return Event(id=e.id, client_id=e.client_id, **body.model_dump())
@@ -35,7 +35,7 @@ def get_event(event_id: int, db: Session = Depends(get_db), tenant=Depends(get_t
     if not e or e.client_id != tenant.id: raise HTTPException(404)
     return Event(id=e.id, client_id=e.client_id, **{k:getattr(e,k) for k in ("title","description","venue","capacity_total","workload_hours","min_presence_pct","start_at","end_at","status")})
 
-@router.post("/{event_id}/days")
+@router.post("/{event_id}/days", dependencies=[Depends(require_roles("organizer","admin"))])
 def add_day(event_id: int, body: DayEventCreate, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
     e = db.get(EventModel, event_id)
     if not e or e.client_id != tenant.id: raise HTTPException(404)
@@ -63,7 +63,7 @@ class EventUpdate(BaseModel):
         from_attributes = True
 
 # substitua o SEU @router.put("/events/{event_id}") por este:
-@router.put("/{event_id}", response_model=Event, dependencies=[Depends(require_roles("admin","organizer"))])
+@router.put("/{event_id}/days/{day_id}", dependencies=[Depends(require_roles("organizer","admin"))])
 def update_event(
     event_id: int,
     body: EventUpdate = Body(...),            # usa seu schema de update

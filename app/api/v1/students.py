@@ -23,7 +23,7 @@ def list_students(q: str | None = Query(None), page: int = 1, db: Session = Depe
         stmt = stmt.where(StudentModel.name.ilike(f"%{q}%"))
     return [Student(id=s.id, client_id=s.client_id, name=s.name, cpf=s.cpf, email=s.email, ra=s.ra, phone=s.phone) for s in db.execute(stmt).scalars().all()]
 
-@router.post("/")
+@router.post("/",  dependencies=[Depends(require_roles("organizer","admin"))])
 def create_student(
     body: StudentCreate,
     db: Session = Depends(get_db),
@@ -49,7 +49,8 @@ def create_student(
 
     obj = student_crud.create(db, body, extra={"client_id": tenant.id})
     return Student(id=obj.id, client_id=obj.client_id, name=obj.name, cpf=obj.cpf, email=obj.email, ra=obj.ra, phone=obj.phone)
-@router.get("/{student_id}", response_model=Student)
+
+@router.put("/{student_id}",    dependencies=[Depends(require_roles("organizer","admin"))])
 def get_student(student_id: int, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
     s = db.get(StudentModel, student_id)
     if not s or s.client_id != tenant.id: raise HTTPException(404)
@@ -62,7 +63,7 @@ def update_student(student_id: int, body: StudentUpdate, db: Session = Depends(g
     s = student_crud.update(db, s, body)
     return Student(id=s.id, client_id=s.client_id, name=s.name, cpf=s.cpf, email=s.email, ra=s.ra, phone=s.phone)
 
-@router.delete("/{student_id}", dependencies=[Depends(require_roles("admin","organizer"))])
+@router.delete("/{student_id}", dependencies=[Depends(require_roles("organizer","admin"))])
 def delete_student(student_id: int, db: Session = Depends(get_db), tenant=Depends(get_tenant), _=Depends(get_current_user_scoped)):
     s = db.get(StudentModel, student_id)
     if not s or s.client_id != tenant.id: raise HTTPException(404)
