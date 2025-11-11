@@ -7,7 +7,7 @@ from app.models.role import Role
 from app.models.user import User
 from app.core.security import hash_password
 
-ROLE_NAMES = ["admin", "organizer", "gate", "student"]
+ROLE_NAMES = ["admin", "organizer", "portaria", "aluno"]
 
 def init_db(db: Session) -> None:
     # Roles
@@ -25,7 +25,7 @@ def init_db(db: Session) -> None:
             name="Cliente Demo",
             cnpj="00.000.000/0000-00",
             slug="demo",
-            contact_email="contato@democliente.com",  # válido
+            contact_email="contato@democliente.com",
             default_min_presence_pct=75,
             lgpd_policy_text="Política de privacidade (demo).",
             certificate_template_html=None,

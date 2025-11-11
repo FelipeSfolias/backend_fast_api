@@ -12,3 +12,7 @@ class Enrollment(BaseModel):
     student_id: int
     event_id: int
     status: EnrollmentStatus
+
+class EnrollmentCreate(BaseModel):
+    student_id: int
+    event_id: int

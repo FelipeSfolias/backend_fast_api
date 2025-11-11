@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Body, status
 from datetime import date, time
+from fastapi import APIRouter, Depends, HTTPException, Query, Path
+import sqlalchemy as sa
 
 
 router = APIRouter()
@@ -107,25 +109,90 @@ def update_event(
     )
 
 
-# substitua o SEU @router.delete("/events/{event_id}", ...) por este:
-@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin","organizer"))])
+@router.delete("/{event_id}", dependencies=[Depends(require_roles("admin", "organizer"))])
 def delete_event(
-    event_id: int,
+    event_id: int = Path(..., ge=1),
+    force: bool = Query(False, description="Se true, apaga em cascata vínculos"),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
     _ = Depends(get_current_user_scoped),
 ):
-    e = db.get(EventModel, event_id)
-    if not e or e.client_id != tenant.id:
-        raise HTTPException(status_code=404, detail="Evento não encontrado")
+    # 1) valida se é do tenant
+    ev = db.execute(
+        select(EventModel).where(EventModel.id == event_id, EventModel.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
 
-    db.delete(e)
+    # 2) se não for force, bloqueia se tiver vínculos
+    if not force:
+        has_refs = db.execute(sa.text("""
+            SELECT
+              EXISTS (SELECT 1 FROM enrollments WHERE event_id = :e) OR
+              EXISTS (SELECT 1 FROM day_events  WHERE event_id = :e)
+        """), {"e": event_id}).scalar()
+        if has_refs:
+            raise HTTPException(
+                status_code=409,
+                detail="Evento possui inscrições ou dias associados. Use ?force=1 para apagar em cascata."
+            )
+
+    params = {"e": event_id, "c": tenant.id}
+
+    # 3) cascade manual (ordem importa)
+    db.execute(sa.text("""
+        DELETE FROM attendances
+        WHERE enrollment_id IN (SELECT id FROM enrollments WHERE event_id = :e)
+           OR day_event_id   IN (SELECT id FROM day_events  WHERE event_id = :e)
+    """), params)
+
+    db.execute(sa.text("""
+        DELETE FROM certificates
+        USING enrollments
+        WHERE certificates.enrollment_id = enrollments.id
+          AND enrollments.event_id = :e
+    """), params)
+
+    db.execute(sa.text("DELETE FROM enrollments WHERE event_id = :e"), params)
+    db.execute(sa.text("DELETE FROM day_events  WHERE event_id = :e"), params)
+
+    res_evt = db.execute(sa.text("DELETE FROM events WHERE id = :e AND client_id = :c"), params)
     db.commit()
-    return None  # 204
+
+    return {"deleted": bool(res_evt.rowcount), "cascade": force}
 
 @router.put("/{event_id}/days/{day_id}",
             response_model=DayEvent,
             dependencies=[Depends(require_roles("admin","organizer"))])
+
+@router.get("/{event_id}/days/{day_id}", response_model=DayEvent)
+def get_day(
+    event_id: int = Path(..., ge=1),
+    day_id: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    _ = Depends(get_current_user_scoped),
+):
+    # valida se o evento é do tenant
+    e = db.get(EventModel, event_id)
+    if not e or e.client_id != tenant.id:
+        raise HTTPException(status_code=404, detail="Evento não encontrado")
+
+    # carrega o dia vinculado ao evento
+    d = db.get(DayModel, day_id)
+    if not d or d.event_id != e.id:
+        raise HTTPException(status_code=404, detail="Dia do evento não encontrado")
+
+    return DayEvent(
+        id=d.id,
+        event_id=d.event_id,
+        date=d.date,
+        start_time=d.start_time,
+        end_time=d.end_time,
+        room=d.room,
+        capacity=d.capacity,
+    )
+    
 def update_day(
     event_id: int,
     day_id: int,

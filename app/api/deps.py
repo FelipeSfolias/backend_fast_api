@@ -9,11 +9,9 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models.client import Client
 from app.models.user import User
+from app.core.tokens import decode_access
 
-# Tokens
-from app.core.tokens import decode_access  # precisa existir no seu projeto
-
-# ---------------- DB dependency ----------------
+# ---------- DB ----------
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
@@ -21,21 +19,10 @@ def get_db() -> Generator[Session, None, None]:
     finally:
         db.close()
 
-# ---------------- Tenant dependency ----------------
 def _norm(s: str | None) -> str:
     return (s or "").strip().lower()
 
-def get_tenant(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> Client:
-    """
-    Resolve o tenant em 3 fontes, nessa ordem:
-    1) path param: request.path_params["tenant"] (se a rota tiver /{tenant}/...)
-    2) header:     X-Tenant: <slug>
-    3) query:      ?tenant=<slug>
-    Busca case-insensitive por slug; se for numérico, tenta por id.
-    """
+def get_tenant(request: Request, db: Session = Depends(get_db)) -> Client:
     slug = (
         _norm(request.path_params.get("tenant"))
         or _norm(request.headers.get("X-Tenant"))
@@ -44,21 +31,14 @@ def get_tenant(
     if not slug:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    cli = db.execute(
-        select(Client).where(func.lower(Client.slug) == slug)
-    ).scalar_one_or_none()
-
+    cli = db.execute(select(Client).where(func.lower(Client.slug) == slug)).scalar_one_or_none()
     if not cli and slug.isdigit():
-        cli = db.execute(
-            select(Client).where(Client.id == int(slug))
-        ).scalar_one_or_none()
-
+        cli = db.execute(select(Client).where(Client.id == int(slug))).scalar_one_or_none()
     if not cli:
         raise HTTPException(status_code=404, detail="Tenant not found")
-
     return cli
 
-# ---------------- Auth dependency ----------------
+# ---------- Auth ----------
 def _get_bearer_token(request: Request) -> str:
     auth = request.headers.get("Authorization") or ""
     if not auth.lower().startswith("bearer "):
@@ -66,49 +46,32 @@ def _get_bearer_token(request: Request) -> str:
     return auth.split(" ", 1)[1].strip()
 
 def _load_user_by_sub(db: Session, tenant: Client, sub: str) -> User | None:
-    # sub por e-mail (padrão) ou id numérico como fallback
+    # teu sub é e-mail (padrão). Aceita id numérico como fallback.
     if sub and sub.isdigit():
         return db.execute(
             select(User).where(
                 User.id == int(sub),
-                # escopo por tenant:
-                # se tiver client_id no modelo:
-                getattr(User, "client_id") == tenant.id
-                if hasattr(User, "client_id")
-                else User.client.has(id=tenant.id)
+                (getattr(User, "client_id") == tenant.id) if hasattr(User, "client_id") else User.client.has(id=tenant.id),
             )
         ).scalar_one_or_none()
-    else:
-        return db.execute(
-            select(User).where(
-                User.email == sub,
-                # escopo por tenant via relação slug (mais robusto)
-                User.client.has(slug=tenant.slug)
-            )
-        ).scalar_one_or_none()
+    return db.execute(
+        select(User).where(
+            User.email == sub,
+            User.client.has(slug=tenant.slug),
+        )
+    ).scalar_one_or_none()
 
 def get_current_user_scoped(
     request: Request,
     db: Session = Depends(get_db),
     tenant: Client = Depends(get_tenant),
 ) -> User:
-    """
-    Lê o JWT de acesso (Authorization: Bearer <token>), valida:
-      - type == 'access'
-      - tenant do token == tenant.slug
-    e carrega o User do tenant.
-    """
+    """Valida access token e escopo (tenant), e retorna o usuário do tenant."""
     token = _get_bearer_token(request)
-
     payload = decode_access(token)
-    if not payload:
+    if not payload or payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token")
-
-    if payload.get("type") != "access":
-        raise HTTPException(status_code=401, detail="Invalid token type")
-
-    tok_tenant = payload.get("tenant")
-    if not tok_tenant or tok_tenant != tenant.slug:
+    if payload.get("tenant") != tenant.slug:
         raise HTTPException(status_code=401, detail="Tenant mismatch")
 
     sub = payload.get("sub")
@@ -118,8 +81,7 @@ def get_current_user_scoped(
     user = _load_user_by_sub(db, tenant, sub)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-
     return user
 
-# alias opcional (se algum lugar importar get_current_user)
+# alias legado
 get_current_user = get_current_user_scoped

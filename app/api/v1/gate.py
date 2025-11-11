@@ -1,35 +1,48 @@
 # app/api/v1/gate.py
 from __future__ import annotations
 
+import datetime as dt
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+<<<<<<< HEAD
 from pydantic import BaseModel
 import datetime as dt
 from zoneinfo import ZoneInfo
 from app.api.v1.users import require_roles
+=======
+
+>>>>>>> a4563aeb7b1c48000b196e1b282b41fdb48d1fc0
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.core.config import settings
+from app.core.rbac import require_min_role, ROLE_PORTARIA
 from app.models.enrollment import Enrollment as EnrollmentModel
-from app.models.day_event import DayEvent as DayModel
+from app.models.day_event import DayEvent as DayEventModel
 from app.models.attendance import Attendance as AttendanceModel
 
-# IMPORTANTE: sem prefix aqui!
-router = APIRouter(tags=["gate"])
+router = APIRouter()
 
-TZ = ZoneInfo(getattr(settings, "TIMEZONE", "America/Sao_Paulo"))
-EARLY_MIN = int(getattr(settings, "GATE_EARLY_MIN", 15))
-LATE_MIN  = int(getattr(settings, "GATE_LATE_MIN",  30))
-
-
-class ScanIn(BaseModel):
+from pydantic import BaseModel
+class GatePayload(BaseModel):
     enrollment_id: int
     day_event_id: int
-    action: str                    # "checkin" | "checkout"
-    device_id: str | None = None
-    ts: str | None = None          # ISO 8601 opcional p/ testes (ex: "2025-11-02T08:59:00-03:00")
+    action: Literal["checkin", "checkout"]
 
+def _require_same_tenant(db: Session, tenant, enr_id: int, day_id: int) -> tuple[EnrollmentModel, DayEventModel]:
+    enr = db.get(EnrollmentModel, enr_id)
+    if not enr:
+        raise HTTPException(status_code=404, detail="Enrollment não encontrado")
+    day = db.get(DayEventModel, day_id)
+    if not day:
+        raise HTTPException(status_code=404, detail="Dia do evento não encontrado")
+    # valida escopo via evento do DayEvent
+    ev = db.get(type(day).event.property.mapper.class_, day.event_id)  # DayEvent->Event
+    if not ev or ev.client_id != tenant.id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    return enr, day
 
+<<<<<<< HEAD
 def _parse_ts(ts: str | None):
     if not ts:
         return dt.datetime.now(dt.timezone.utc)
@@ -62,43 +75,32 @@ def _window_utc(day: DayModel):
 @router.post("/scan", dependencies=[Depends(require_roles("portaria","organizer","admin"))])
 def scan(
     body: ScanIn = Body(...),
+=======
+@router.post("/scan", dependencies=[Depends(require_min_role(ROLE_PORTARIA))])
+def gate_scan(
+    body: GatePayload = Body(...),
+>>>>>>> a4563aeb7b1c48000b196e1b282b41fdb48d1fc0
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
     _ = Depends(get_current_user_scoped),
 ):
-    # valida enrollment & day_event
-    enr = db.get(EnrollmentModel, body.enrollment_id)
-    if not enr:
-        raise HTTPException(status_code=404, detail="ENROLLMENT_NOT_FOUND")
+    enr, day = _require_same_tenant(db, tenant, body.enrollment_id, body.day_event_id)
 
-    day = db.get(DayModel, body.day_event_id)
-    if not day:
-        raise HTTPException(status_code=404, detail="DAY_NOT_FOUND")
-
-    # opcional: garantir mesmo evento
-    if getattr(enr, "event_id", None) != getattr(day, "event_id", None):
-        raise HTTPException(status_code=400, detail="MISMATCH_EVENT")
-
-    now_utc = _parse_ts(body.ts)
-    start_utc, end_utc = _window_utc(day)
-    if not (start_utc <= now_utc <= end_utc):
-        raise HTTPException(status_code=400, detail="OUT_OF_WINDOW")
-
-    # upsert por (enrollment_id, day_event_id)
     att = db.execute(
         select(AttendanceModel).where(
             AttendanceModel.enrollment_id == enr.id,
             AttendanceModel.day_event_id == day.id,
         )
     ).scalar_one_or_none()
-    if not att:
-        att = AttendanceModel(enrollment_id=enr.id, day_event_id=day.id)
 
+    now = dt.datetime.now(dt.timezone.utc)
     if body.action == "checkin":
-        att.checkin_at = now_utc
-    elif body.action == "checkout":
-        att.checkout_at = now_utc
+        if not att:
+            att = AttendanceModel(enrollment_id=enr.id, day_event_id=day.id, checkin_at=now, origin="gate")
+        else:
+            att.checkin_at = now
     else:
+<<<<<<< HEAD
         raise HTTPException(status_code=400, detail="INVALID_ACTION")
 
     if hasattr(att, "origin") and body.device_id:
@@ -134,11 +136,17 @@ def get_attendance(
     ).scalar_one_or_none()
     if not att:
         raise HTTPException(status_code=404, detail="ATTENDANCE_NOT_FOUND")
+=======
+        if not att:
+            raise HTTPException(status_code=404, detail="Registro de presença não encontrado para checkout")
+        att.checkout_at = now
+>>>>>>> a4563aeb7b1c48000b196e1b282b41fdb48d1fc0
 
+    db.add(att); db.commit(); db.refresh(att)
     return {
+        "id": att.id,
         "enrollment_id": att.enrollment_id,
         "day_event_id": att.day_event_id,
-        "checkin_at": getattr(att, "checkin_at", None),
-        "checkout_at": getattr(att, "checkout_at", None),
-        "origin": getattr(att, "origin", None),
+        "checkin_at": att.checkin_at,
+        "checkout_at": att.checkout_at,
     }
