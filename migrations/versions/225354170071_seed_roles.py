@@ -7,8 +7,8 @@ Create Date: 2025-11-11 19:30:00.036352
 from alembic import op
 import sqlalchemy as sa
 
-revision = "seedroles01a2b3"                 # ID curto e único (<=32)
-down_revision = "20251107_rbac_roles_portaria"  # <<< depende do shim
+revision = "seedroles01a2b3"
+down_revision = "20251107_rbac_roles_portaria"
 branch_labels = None
 depends_on = None
 
@@ -17,10 +17,9 @@ def upgrade():
     for name in ("admin", "organizer", "portaria", "aluno"):
         conn.execute(
             sa.text(
-                "INSERT INTO roles(name) "
-                "SELECT :n WHERE NOT EXISTS (SELECT 1 FROM roles WHERE name=:n)"
-            ),
-            {"n": name},
+                "INSERT INTO roles(name) VALUES (:n) "
+                "ON CONFLICT (name) DO NOTHING"
+            ).bindparams(sa.bindparam("n", type_=sa.String(32)))
         )
 
 def downgrade():
