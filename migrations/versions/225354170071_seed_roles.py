@@ -1,16 +1,14 @@
 """seed roles
 
-Revision ID: 225354170071
+Revision ID: seedroles01a2b3
 Revises: 90d35432c0e8
 Create Date: 2025-11-11 19:30:00.036352
-
 """
 from alembic import op
 import sqlalchemy as sa
 
-# Use a rev ID curta (gerada pelo Alembic)
-revision = "90d35432c0e8"
-down_revision = "225354170071"  # ex: "90d35432c0e8"
+revision = "seedroles01a2b3"          # ID curto e único
+down_revision = "90d35432c0e8"        # a migration anterior real
 branch_labels = None
 depends_on = None
 
