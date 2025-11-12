@@ -14,13 +14,15 @@ depends_on = None
 
 def upgrade():
     conn = op.get_bind()
+
+    stmt = sa.text(
+        "INSERT INTO roles(name) VALUES (:n) "
+        "ON CONFLICT (name) DO NOTHING"
+    ).bindparams(sa.bindparam("n", type_=sa.String(32)))
+
     for name in ("admin", "organizer", "portaria", "aluno"):
-        conn.execute(
-            sa.text(
-                "INSERT INTO roles(name) VALUES (:n) "
-                "ON CONFLICT (name) DO NOTHING"
-            ).bindparams(sa.bindparam("n", type_=sa.String(32)))
-        )
+        conn.execute(stmt, {"n": name})
+
 
 def downgrade():
     conn = op.get_bind()
