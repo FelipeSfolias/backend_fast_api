@@ -134,7 +134,6 @@ def get_certificate(
     return _to_out(c)
 
 def _roles_set(u) -> set[str]:
-    # tenta extrair nomes das roles em diferentes formatos
     roles = getattr(u, "roles", []) or getattr(u, "role_names", [])
     out: set[str] = set()
     for r in roles:
@@ -144,80 +143,77 @@ def _roles_set(u) -> set[str]:
             out.add(str(r.name).lower())
     return out
 
-@router.get("/by-user/{user_id}")
-async def list_certificates_by_user(
-    user_id: int,
+@router.get("/by-student/{student_id}",
+            dependencies=[Depends(require_roles("admin","organizer","portaria","aluno"))])
+def list_certificates_by_student(
+    student_id: int,
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
     current = Depends(get_current_user_scoped),
 ):
     """
-    Retorna todos os certificados ligados ao usuário (por e-mail),
-    já com dados de aluno, evento e matrícula.
-    Regras:
-      - admin/organizer/portaria: pode consultar qualquer user do tenant
-      - aluno: só pode consultar o próprio user_id
+    Retorna todos os certificados de um aluno (student_id) do tenant atual.
+    - admin/organizer/portaria: podem consultar qualquer aluno do tenant.
+    - aluno: só pode consultar o próprio student_id (validado por e-mail).
     """
-    roles = _roles_set(current)
-    if "aluno" in roles and user_id != getattr(current, "id", None):
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # valida aluno + tenant
+    stu = db.scalar(select(Student).where(Student.id == student_id))
+    if not stu or getattr(stu, "client_id", None) != tenant.id:
+        raise HTTPException(404, detail="Student not found")
 
-    # join por e-mail + tenant
+    roles = _roles_set(current)
+    if "aluno" in roles:
+        # vínculo por e-mail (modelo atual); se você já tiver FK student.user_id, trocamos por ela
+        cur_email = (getattr(current, "email", "") or "").lower().strip()
+        if (stu.email or "").lower().strip() != cur_email:
+            raise HTTPException(403, detail="Forbidden")
+
     stmt = (
-        select(Certificate, Enrollment, Student, Event, User)
+        select(Certificate, Enrollment, Student, Event)
         .join(Enrollment, Enrollment.id == Certificate.enrollment_id)
         .join(Student, Student.id == Enrollment.student_id)
         .join(Event, Event.id == Enrollment.event_id)
-        .join(User, and_(User.email == Student.email, User.client_id == Event.client_id))
         .where(
-            User.id == user_id,
-            Event.client_id == tenant.id,
+            Student.id == student_id,
+            Event.client_id == tenant.id,   # garante escopo
         )
         .order_by(Certificate.issued_at.desc())
     )
 
     rows = db.execute(stmt).all()
-
     out: List[dict] = []
-    for cert, enr, stu, ev, usr in rows:
-        status = cert.status.value if hasattr(cert.status, "value") else str(cert.status)
+    for cert, enr, stu, ev in rows:
+        cert_status = cert.status.value if hasattr(cert.status, "value") else str(cert.status)
         enr_status = enr.status.value if hasattr(enr.status, "value") else str(enr.status)
-        out.append(
-            {
-                "certificate": {
-                    "id": cert.id,
-                    "status": status,
-                    "issued_at": cert.issued_at,
-                    "pdf_url": cert.pdf_url,
-                    "verify_code": cert.verify_code,
-                },
-                "enrollment": {
-                    "id": enr.id,
-                    "status": enr_status,
-                },
-                "student": {
-                    "id": stu.id,
-                    "name": stu.name,
-                    "email": stu.email,
-                    "cpf": stu.cpf,
-                    "ra": stu.ra,
-                    "phone": stu.phone,
-                },
-                "event": {
-                    "id": ev.id,
-                    "title": ev.title,
-                    "venue": ev.venue,
-                    "workload_hours": ev.workload_hours,
-                    "start_at": ev.start_at,
-                    "end_at": ev.end_at,
-                },
-                "user": {
-                    "id": usr.id,
-                    "name": usr.name,
-                    "email": usr.email,
-                },
-            }
-        )
+        out.append({
+            "certificate": {
+                "id": cert.id,
+                "status": cert_status,
+                "issued_at": cert.issued_at,
+                "pdf_url": cert.pdf_url,
+                "verify_code": cert.verify_code,
+            },
+            "enrollment": {
+                "id": enr.id,
+                "status": enr_status,
+            },
+            "student": {
+                "id": stu.id,
+                "name": stu.name,
+                "email": stu.email,
+                "cpf": stu.cpf,
+                "ra": stu.ra,
+                "phone": stu.phone,
+            },
+            "event": {
+                "id": ev.id,
+                "title": ev.title,
+                "venue": ev.venue,
+                "workload_hours": ev.workload_hours,
+                "start_at": ev.start_at,
+                "end_at": ev.end_at,
+            },
+        })
     return out
 # -------------------- verificação pública --------------------
 
