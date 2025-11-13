@@ -7,10 +7,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.rbac import ROLE_ALUNO
-from app.models.attendance import AttendanceOut as Attendance
+from app.models.attendance import AttendanceOut, Attendance
 from app.models.enrollment import Enrollment
 from app.models.student import Student as StudentModel
-from app.schemas.attendance import Attendance as AttendanceOut
 from sqlalchemy.orm import Session, joinedload
 from app.models.event import Event
 from sqlalchemy import select, and_
