@@ -1,29 +1,19 @@
-# app/api/v1/attendance.py
 from __future__ import annotations
-from app.core.rbac import require_roles
-from typing import List, Optional
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import select
-from app.api.deps import get_db, get_tenant, get_current_user_scoped
-from app.core.rbac import ROLE_ALUNO
-from app.models.attendance import AttendanceOut, Attendance
-from app.models.enrollment import Enrollment
-from app.models.student import Student as StudentModel
-from sqlalchemy.orm import Session, joinedload
-from app.models.event import Event
+from typing import Optional, List
+
+from fastapi import APIRouter, Depends
 from sqlalchemy import select, and_
+from sqlalchemy.orm import Session, joinedload
+
+from app.api.deps import get_db, get_tenant, get_current_user_scoped
+from app.core.rbac import require_roles
+from app.models.attendance import Attendance
+from app.models.enrollment import Enrollment
+from app.models.day_event import DayEvent
+from app.models.event import Event
+from app.schemas.attendance import AttendanceOut
 
 router = APIRouter()
-
-def _current_student_id(db: Session, tenant, user) -> Optional[int]:
-    st = db.execute(
-        select(StudentModel.id).where(
-            StudentModel.client_id == tenant.id,
-            StudentModel.email == user.email
-        )
-    ).scalar_one_or_none()
-    return st
 
 # GET /{tenant}/attendance?event_id=..&day_id=..&student_id=..
 @router.get("/", response_model=List[AttendanceOut],
