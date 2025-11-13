@@ -17,5 +17,7 @@ class Attendance(Base):
     checkin_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     checkout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     origin: Mapped[str] = mapped_column(String(20), default=AttendanceOrigin.gate)
-
+    enrollment = relationship("Enrollment")
+    day_event = relationship("DayEvent")   
+    
     __table_args__ = (UniqueConstraint("enrollment_id","day_event_id", name="uq_attendance_unique"),)
