@@ -13,7 +13,7 @@ api_router.include_router(gate.router,         prefix="/{tenant}/gate",         
 api_router.include_router(attendance.router,   prefix="/{tenant}/attendance",   tags=["attendance"])
 api_router.include_router(certificates.router, prefix="/{tenant}/certificates", tags=["certificates"])
 api_router.include_router(users.router, prefix="/{tenant}/users", tags=["users"])
-api_router.include_router(clients.tenant_router, prefix="/{tenant}/client", tags=["client"])
+api_router.include_router(clients.router, prefix="/{tenant}/client", tags=["client"])
 api_router.include_router(clients.public_router, prefix="/client", tags=["client"])
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(clients.router, prefix="/client", tags=["client-public"])
