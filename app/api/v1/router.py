@@ -10,8 +10,8 @@ from app.api.v1 import (
     attendance,
     certificates,
     clients,
-    # users,  # descomente esta linha e o include lá embaixo somente se você já criou app/api/v1/users.py
-)
+    users,
+    )
 
 api_router = APIRouter()
 
@@ -28,6 +28,5 @@ api_router.include_router(enrollments.router,  prefix="/{tenant}",              
 api_router.include_router(gate.router,         prefix="/{tenant}/gate",         tags=["gate"])
 api_router.include_router(attendance.router,   prefix="/{tenant}/attendance",   tags=["attendance"])
 api_router.include_router(certificates.router, prefix="/{tenant}/certificates", tags=["certificates"])
-# GET/PUT do client do próprio tenant: /api/v1/{tenant}/client[/...]
 api_router.include_router(clients.router,      prefix="/{tenant}/client",       tags=["client"])
-# api_router.include_router(users.router,        prefix="/{tenant}/users",        tags=["users"])  # só se existir
+api_router.include_router(users.router, prefix="/{tenant}/users", tags=["users"])
