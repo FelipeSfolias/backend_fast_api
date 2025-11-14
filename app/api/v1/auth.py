@@ -1,6 +1,5 @@
 # app/api/v1/auth.py
 from __future__ import annotations
-import json
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from typing import Tuple, List, Optional, Set
@@ -13,17 +12,33 @@ import sqlalchemy as sa
 
 from app.api.deps import get_db, get_tenant
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
-from app.core.security_password import verify_and_maybe_upgrade  # teu módulo original
+from app.core.security_password import verify_and_maybe_upgrade
 
 from app.models.user import User
 from app.models.role import Role
-from app.models.tokens import RefreshToken  # já existe no teu ZIP
 
-# (opcional) se existir o modelo da tabela associativa, usamos no fallback:
+# ---- imports tolerantes (evita boot crash se o nome do arquivo/model variar) ----
+RefreshToken = None  # type: ignore
 try:
-    from app.models.user_role import UserRole  # pode não existir no teu ZIP; tratamos abaixo
-except Exception:  # pragma: no cover
-    UserRole = None  # type: ignore
+    from app.models.tokens import RefreshToken as _RT  # seu ZIP original
+    RefreshToken = _RT  # type: ignore
+except Exception:
+    try:
+        from app.models.refresh_token import RefreshToken as _RT  # alguns forks
+        RefreshToken = _RT  # type: ignore
+    except Exception:
+        RefreshToken = None  # sem persistência de refresh; endpoints seguem funcionando
+
+UserRole = None  # type: ignore
+try:
+    from app.models.user_role import UserRole as _UR
+    UserRole = _UR  # type: ignore
+except Exception:
+    try:
+        from app.models.user_roles import UserRole as _UR  # variação comum
+        UserRole = _UR  # type: ignore
+    except Exception:
+        UserRole = None  # usamos fallback SQL textual
 
 router = APIRouter()
 
@@ -43,19 +58,17 @@ def _read_password_field(user: User):
 
 def _collect_role_names(db: Session, user: User) -> Tuple[List[str], Optional[str]]:
     """
-    Retorna (roles_ordenadas, role_principal) do usuário.
-    1) tenta via relacionamento user.roles
-    2) fallback: consulta via UserRole/roles (ou SQL textual)
+    Retorna (roles_ordenadas, role_principal).
+    1) via relacionamento user.roles
+    2) fallback via UserRole/Role ou SQL textual
     """
     names: Set[str] = set()
 
-    # 1) relacionamento já carregado / lazy
     for r in (getattr(user, "roles", None) or []):
         n = getattr(r, "name", None)
         if n:
             names.add(str(n).lower())
 
-    # 2) fallback por consulta direta
     if not names:
         if UserRole is not None:
             rows = db.execute(
@@ -67,7 +80,7 @@ def _collect_role_names(db: Session, user: User) -> Tuple[List[str], Optional[st
                 if n:
                     names.add(str(n).lower())
         else:
-            # fallback textual: supõe nomes de tabela "user_roles" e "roles"
+            # fallback textual (tabelas user_roles / roles)
             rows = db.execute(
                 sa.text(
                     "SELECT r.name FROM roles r "
@@ -85,32 +98,22 @@ def _collect_role_names(db: Session, user: User) -> Tuple[List[str], Optional[st
     primary = next((p for p in precedence if p in names), None)
     return ordered, primary
 
-def _auth_response(
-    user: User,
-    tokens: dict,
-    roles: List[str],
-    primary_role: Optional[str],
-):
-    """
-    Monta a resposta sem alterar o formato dos tokens que você já usa.
-    Adiciona os dados de usuário com roles.
-    """
+def _auth_response(user: User, tokens: dict, roles: List[str], primary_role: Optional[str]):
     return {
         **tokens,
         "user": {
             "id": user.id,
             "name": user.name,
             "email": user.email,
-            "roles": roles,            # <<<<<< usado no front
-            "role": primary_role,      # <<<<<< papel principal
+            "roles": roles,       # <- para o front gatear páginas
+            "role": primary_role, # <- papel principal
             "status": getattr(user, "status", None),
             "mfa": getattr(user, "mfa", None),
         },
     }
 
 def issue_tokens_for(user: User, tenant, scope: str = "") -> dict:
-    # Mantém seu sub como e-mail (compatibilidade)
-    sub = user.email
+    sub = user.email  # mantém compatibilidade: sub = email
     return {
         "access_token": create_access_token(sub=sub, tenant=tenant.slug, scope=scope),
         "refresh_token": create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope),
@@ -118,25 +121,21 @@ def issue_tokens_for(user: User, tenant, scope: str = "") -> dict:
     }
 
 async def _extract_credentials_from_request(request: Request) -> tuple[str, str]:
-    # 1) JSON {username,password} ou {email,password}
-    if request.headers.get("content-type", "").lower().startswith("application/json"):
+    ct = request.headers.get("content-type", "").lower()
+    if ct.startswith("application/json"):
         data = await request.json()
         if isinstance(data, dict):
             email = normalize_email(data.get("username") or data.get("email") or "")
             password = data.get("password") or ""
             if email and password:
                 return email, password
-
-    # 2) x-www-form-urlencoded (username/password)
-    if request.headers.get("content-type", "").lower().startswith("application/x-www-form-urlencoded"):
+    if ct.startswith("application/x-www-form-urlencoded"):
         form = await request.body()
         parsed = parse_qs(form.decode(), keep_blank_values=True)
         email = normalize_email((parsed.get("username", [""])[0]) or "")
         password = (parsed.get("password", [""])[0]) or ""
         if email and password:
             return email, password
-
-    # 3) texto puro "username=...&password=..."
     raw = (await request.body()).decode()
     if raw:
         parsed = parse_qs(raw, keep_blank_values=True)
@@ -144,7 +143,6 @@ async def _extract_credentials_from_request(request: Request) -> tuple[str, str]
         password = (parsed.get("password", [""])[0]) or ""
         if email and password:
             return email, password
-
     raise HTTPException(
         status_code=422,
         detail=[{"loc": ["body"], "msg": "Esperado JSON {username,password} ou form-urlencoded ou raw 'username=...&password=...'", "type": "value_error"}],
@@ -183,22 +181,23 @@ async def login(
     roles, primary = _collect_role_names(db, user)
     tokens = issue_tokens_for(user, tenant)
 
-    # registra refresh (se o model existir com jti)
-    payload = decode_refresh(tokens["refresh_token"])
-    try:
-        if payload and payload.get("jti"):
-            row = RefreshToken(jti=payload["jti"])
-            if hasattr(row, "tenant_slug"):
-                row.tenant_slug = tenant.slug
-            if hasattr(row, "user_email"):
-                row.user_email = user.email
-            if hasattr(row, "issued_at") and "iat" in payload:
-                row.issued_at = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
-            if hasattr(row, "expires_at") and "exp" in payload:
-                row.expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-            db.add(row); db.commit()
-    except Exception:
-        pass
+    # registra refresh somente se o modelo existir
+    if RefreshToken is not None:
+        payload = decode_refresh(tokens["refresh_token"])
+        try:
+            if payload and payload.get("jti"):
+                row = RefreshToken(jti=payload["jti"])  # type: ignore
+                if hasattr(row, "tenant_slug"):
+                    row.tenant_slug = tenant.slug
+                if hasattr(row, "user_email"):
+                    row.user_email = user.email
+                if hasattr(row, "issued_at") and "iat" in payload:
+                    row.issued_at = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
+                if hasattr(row, "expires_at") and "exp" in payload:
+                    row.expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+                db.add(row); db.commit()
+        except Exception:
+            pass
 
     return _auth_response(user, tokens, roles, primary)
 
@@ -244,26 +243,25 @@ def refresh(
     if not payload or payload.get("tenant") != tenant.slug or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    sub = payload.get("sub")  # e-mail (seu sub)
+    sub = payload.get("sub")  # e-mail
     scope = payload.get("scope", "")
 
-    # rotação: cria novos tokens primeiro (mantém tua semântica)
     new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
     new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
-    # rotação (revoga antigo e registra o novo) se houver jti
-    try:
-        if hasattr(RefreshToken, "jti"):
+    # rotação (se houver tabela)
+    if RefreshToken is not None:
+        try:
             old_jti = payload.get("jti")
             if old_jti:
-                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == old_jti)).scalar_one_or_none()
+                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == old_jti)).scalar_one_or_none()  # type: ignore
                 if rt and getattr(rt, "revoked_at", None) is None:
                     rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
                     db.add(rt)
 
             new_payload = decode_refresh(new_refresh)
             if new_payload and new_payload.get("jti"):
-                row = RefreshToken(jti=new_payload["jti"])
+                row = RefreshToken(jti=new_payload["jti"])  # type: ignore
                 if hasattr(row, "tenant_slug"):
                     row.tenant_slug = tenant.slug
                 if hasattr(row, "user_email"):
@@ -274,15 +272,14 @@ def refresh(
                     row.expires_at = datetime.fromtimestamp(new_payload["exp"], tz=timezone.utc)
                 db.add(row)
             db.commit()
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # carrega o usuário para devolver as roles também no refresh
+    # carrega o usuário p/ devolver roles também no refresh
     user = db.execute(
         select(User).where(User.email == sub, User.client.has(slug=tenant.slug))
     ).scalar_one_or_none()
     if not user:
-        # Mesmo se o user tiver sido removido, devolvemos tokens como antes (fallback)
         return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
 
     roles, primary = _collect_role_names(db, user)
@@ -298,8 +295,8 @@ def logout(
 ):
     tok = _get_token_from_body_or_query(token, token_q)
     payload = decode_refresh(tok)
-    if payload and payload.get("tenant") == tenant.slug and hasattr(RefreshToken, "jti") and "jti" in payload:
-        rt = db.execute(select(RefreshToken).where(RefreshToken.jti == payload["jti"])).scalar_one_or_none()
+    if RefreshToken is not None and payload and payload.get("tenant") == tenant.slug and "jti" in payload:
+        rt = db.execute(select(RefreshToken).where(RefreshToken.jti == payload["jti"])).scalar_one_or_none()  # type: ignore
         if rt and getattr(rt, "revoked_at", None) is None:
             rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
             db.add(rt)
