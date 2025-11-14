@@ -263,3 +263,29 @@ def refresh(
         "token_type": "bearer",
         "user": _user_payload(db, user),
     }
+
+@router.post("/logout")
+def logout(
+    token: str | None = Body(default=None, embed=True),
+    token_q: str | None = Query(default=None, alias="token"),
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+):
+    tok = _get_token_from_body_or_query(token, token_q)
+    payload = decode_refresh(tok)
+    if not payload or payload.get("tenant") != tenant.slug or payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        if hasattr(RefreshToken, "jti"):
+            jti = payload.get("jti")
+            if jti:
+                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == jti)).scalar_one_or_none()
+                if rt and getattr(rt, "revoked_at", None) is None:
+                    rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+                    db.add(rt)
+                    db.commit()
+    except Exception:
+        pass
+
+    return {"detail": "Logged out"}
