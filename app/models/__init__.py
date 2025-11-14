@@ -3,7 +3,7 @@ from app.db.base import Base
 from app.models.client import Client
 from app.models.role import Role
 from app.models.user import User
-from app.models.user_role import UserRole
+from app.models.user_role import user_roles
 from app.models.student import Student
 from app.models.event import Event
 from app.models.day_event import DayEvent
@@ -14,6 +14,6 @@ from app.models.audit import AuditLog
 from app.models.tokens import RefreshToken, IdempotencyKey
 
 __all__ = [
-    "Base","Client","Role","User","UserRole","Student","Event","DayEvent","Enrollment","EnrollmentStatus",
+    "Base","Client","Role","User","user_roles","Student","Event","DayEvent","Enrollment","EnrollmentStatus",
     "Attendance","AttendanceOrigin","Certificate","CertificateStatus","AuditLog","RefreshToken","IdempotencyKey"
 ]
