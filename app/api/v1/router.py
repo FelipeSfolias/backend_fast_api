@@ -11,6 +11,7 @@ from app.api.v1 import (
     certificates,
     clients,
     users,
+    roles
     )
 
 api_router = APIRouter()
@@ -30,3 +31,4 @@ api_router.include_router(attendance.router,   prefix="/{tenant}/attendance",   
 api_router.include_router(certificates.router, prefix="/{tenant}/certificates", tags=["certificates"])
 api_router.include_router(clients.router,      prefix="/{tenant}/client",       tags=["client"])
 api_router.include_router(users.router, prefix="/{tenant}/users", tags=["users"])
+api_router.include_router(roles.router, prefix="/{tenant}/roles", tags=["roles"])
