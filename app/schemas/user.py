@@ -1,37 +1,33 @@
 # app/schemas/user.py
 from __future__ import annotations
-from typing import Optional, List
-from pydantic import BaseModel, EmailStr
+from typing import Literal, List, Optional
+from pydantic import BaseModel, EmailStr, Field
 
-# v2: from_attributes; v1: orm_mode=True (se estiver em Pydantic v1, troque as Configs)
+RoleName = Literal["admin", "organizer", "portaria", "aluno"]
+
 class UserBase(BaseModel):
     name: str
     email: EmailStr
     status: str = "active"
+    mfa: Optional[bool] = None
 
-class UserCreate(BaseModel):
-    name: str
-    email: EmailStr
-    password: str
-    status: Optional[str] = "active"
-    # nomes de papéis a vincular (ex.: ["admin"], ["organizer","portaria"], etc.)
-    role_names: Optional[List[str]] = None
+class UserCreate(UserBase):
+    password: str = Field(min_length=6)
+    roles: List[RoleName] = Field(default_factory=list)
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     status: Optional[str] = None
-    role_names: Optional[List[str]] = None
+    mfa: Optional[bool] = None
+    password: Optional[str] = Field(default=None, min_length=6)
+    roles: Optional[List[RoleName]] = None  # substitui conjunto de papéis (se enviado)
 
-class User(BaseModel):
+class UserOut(BaseModel):
     id: int
-    client_id: int
     name: str
     email: EmailStr
     status: str
+    mfa: Optional[bool] = None
     roles: List[str] = []
 
-    class Config:
-        from_attributes = True
-
-# Compatibilidade com código legado que importava UserOut
-UserOut = User
+    model_config = {"from_attributes": True}
