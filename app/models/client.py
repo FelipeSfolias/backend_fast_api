@@ -25,3 +25,4 @@ class Client(Base):
     users = relationship("User", back_populates="client")
     students = relationship("Student", back_populates="client")
     events = relationship("Event", back_populates="client")
+    

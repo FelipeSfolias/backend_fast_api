@@ -3,17 +3,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from typing import Tuple, List, Optional, Set
-
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 import sqlalchemy as sa
-
+from sqlalchemy import select, join
+from app.models.role import Role
+from app.models.user_role import user_roles
 from app.api.deps import get_db, get_tenant
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
 from app.core.security_password import verify_and_maybe_upgrade
-
 from app.models.user import User
 from app.models.role import Role
 
@@ -55,48 +55,6 @@ def _read_password_field(user: User):
         if hasattr(user, name):
             return name, getattr(user, name)
     raise HTTPException(status_code=500, detail="Modelo de usuário sem campo de senha")
-
-def _collect_role_names(db: Session, user: User) -> Tuple[List[str], Optional[str]]:
-    """
-    Retorna (roles_ordenadas, role_principal).
-    1) via relacionamento user.roles
-    2) fallback via UserRole/Role ou SQL textual
-    """
-    names: Set[str] = set()
-
-    for r in (getattr(user, "roles", None) or []):
-        n = getattr(r, "name", None)
-        if n:
-            names.add(str(n).lower())
-
-    if not names:
-        if UserRole is not None:
-            rows = db.execute(
-                select(Role.name)
-                .join(UserRole, UserRole.role_id == Role.id)
-                .where(UserRole.user_id == user.id)
-            ).all()
-            for (n,) in rows:
-                if n:
-                    names.add(str(n).lower())
-        else:
-            # fallback textual (tabelas user_roles / roles)
-            rows = db.execute(
-                sa.text(
-                    "SELECT r.name FROM roles r "
-                    "JOIN user_roles ur ON ur.role_id = r.id "
-                    "WHERE ur.user_id = :uid"
-                ),
-                {"uid": user.id},
-            ).all()
-            for (n,) in rows:
-                if n:
-                    names.add(str(n).lower())
-
-    ordered = sorted(names)
-    precedence = ["admin", "organizer", "portaria", "aluno"]
-    primary = next((p for p in precedence if p in names), None)
-    return ordered, primary
 
 def _auth_response(user: User, tokens: dict, roles: List[str], primary_role: Optional[str]):
     return {
@@ -154,13 +112,38 @@ def _get_token_from_body_or_query(token_body: str | None, token_query: str | Non
         raise HTTPException(status_code=422, detail=[{"loc": ["token"], "msg": "Field required", "type": "value_error.missing"}])
     return tok
 
-# ---------- endpoints ----------
+# ... imports e helpers mantidos
+
+
+def _role_names_for_user(db, user_id: int) -> list[str]:
+    # funciona mesmo que o relationship não tenha sido carregado
+    try:
+        rel = getattr(type(user_roles.c.user_id).table, "name", "user_roles")  # só para evitar lints
+    except Exception:
+        pass
+    rows = db.execute(
+        select(Role.name)
+        .select_from(user_roles.join(Role, user_roles.c.role_id == Role.id))
+        .where(user_roles.c.user_id == user_id)
+    ).all()
+    return [r[0] for r in rows]
+
+def _user_payload(db, user):
+    # tenta via relationship; senão, faz join
+    names = [r.name for r in getattr(user, "roles", [])] or _role_names_for_user(db, user.id)
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "status": user.status,
+        "mfa": bool(user.mfa),
+        "roles": names,
+        # por compat: primeiro papel também como 'role'
+        "role": names[0] if names else None,
+    }
+
 @router.post("/login")
-async def login(
-    request: Request,
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-):
+async def login(request: Request, db: Session = Depends(get_db), tenant = Depends(get_tenant)):
     email, password = await _extract_credentials_from_request(request)
     ensure_password_policy(password)
 
@@ -176,30 +159,27 @@ async def login(
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
     if new_hash:
         setattr(user, field_name, new_hash)
-        db.add(user); db.commit()
+        db.add(user); db.commit(); db.refresh(user)
 
-    roles, primary = _collect_role_names(db, user)
     tokens = issue_tokens_for(user, tenant)
+    payload = decode_refresh(tokens["refresh_token"])
+    try:
+        if payload and payload.get("jti"):
+            row = RefreshToken(jti=payload["jti"])
+            if hasattr(row, "tenant_slug"): row.tenant_slug = tenant.slug
+            if hasattr(row, "user_email"):  row.user_email  = user.email
+            if hasattr(row, "issued_at") and "iat" in payload:
+                row.issued_at = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
+            if hasattr(row, "expires_at") and "exp" in payload:
+                row.expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+            db.add(row); db.commit()
+    except Exception:
+        pass
 
-    # registra refresh somente se o modelo existir
-    if RefreshToken is not None:
-        payload = decode_refresh(tokens["refresh_token"])
-        try:
-            if payload and payload.get("jti"):
-                row = RefreshToken(jti=payload["jti"])  # type: ignore
-                if hasattr(row, "tenant_slug"):
-                    row.tenant_slug = tenant.slug
-                if hasattr(row, "user_email"):
-                    row.user_email = user.email
-                if hasattr(row, "issued_at") and "iat" in payload:
-                    row.issued_at = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
-                if hasattr(row, "expires_at") and "exp" in payload:
-                    row.expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
-                db.add(row); db.commit()
-        except Exception:
-            pass
-
-    return _auth_response(user, tokens, roles, primary)
+    return {
+        **tokens,
+        "user": _user_payload(db, user),
+    }
 
 @router.post("/token")
 def login_oauth2_form(
@@ -225,16 +205,18 @@ def login_oauth2_form(
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
     if new_hash:
         setattr(user, field_name, new_hash)
-        db.add(user); db.commit()
+        db.add(user); db.commit(); db.refresh(user)
 
-    roles, primary = _collect_role_names(db, user)
     tokens = issue_tokens_for(user, tenant)
-    return _auth_response(user, tokens, roles, primary)
+    return {
+        **tokens,
+        "user": _user_payload(db, user),
+    }
 
 @router.post("/refresh")
 def refresh(
-    token: str | None = Body(default=None, embed=True),        # {"token":"<refresh>"}
-    token_q: str | None = Query(default=None, alias="token"),  # ?token=<refresh>
+    token: str | None = Body(default=None, embed=True),
+    token_q: str | None = Query(default=None, alias="token"),
     db: Session = Depends(get_db),
     tenant = Depends(get_tenant),
 ):
@@ -243,62 +225,44 @@ def refresh(
     if not payload or payload.get("tenant") != tenant.slug or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    sub = payload.get("sub")  # e-mail
+    sub = payload.get("sub")
     scope = payload.get("scope", "")
 
-    new_access = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
+    user = db.execute(
+        select(User).where(User.email == sub, User.client_id == tenant.id)
+    ).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found for this tenant")
+
+    new_access  = create_access_token(sub=sub, tenant=tenant.slug, scope=scope)
     new_refresh = create_refresh_token(sub=sub, tenant=tenant.slug, scope=scope)
 
-    # rotação (se houver tabela)
-    if RefreshToken is not None:
-        try:
+    try:
+        if hasattr(RefreshToken, "jti"):
             old_jti = payload.get("jti")
             if old_jti:
-                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == old_jti)).scalar_one_or_none()  # type: ignore
+                rt = db.execute(select(RefreshToken).where(RefreshToken.jti == old_jti)).scalar_one_or_none()
                 if rt and getattr(rt, "revoked_at", None) is None:
                     rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
                     db.add(rt)
 
             new_payload = decode_refresh(new_refresh)
             if new_payload and new_payload.get("jti"):
-                row = RefreshToken(jti=new_payload["jti"])  # type: ignore
-                if hasattr(row, "tenant_slug"):
-                    row.tenant_slug = tenant.slug
-                if hasattr(row, "user_email"):
-                    row.user_email = sub
+                row = RefreshToken(jti=new_payload["jti"])
+                if hasattr(row, "tenant_slug"): row.tenant_slug = tenant.slug
+                if hasattr(row, "user_email"):  row.user_email  = sub
                 if hasattr(row, "issued_at") and "iat" in new_payload:
                     row.issued_at = datetime.fromtimestamp(new_payload["iat"], tz=timezone.utc)
                 if hasattr(row, "expires_at") and "exp" in new_payload:
                     row.expires_at = datetime.fromtimestamp(new_payload["exp"], tz=timezone.utc)
                 db.add(row)
             db.commit()
-        except Exception:
-            pass
+    except Exception:
+        pass
 
-    # carrega o usuário p/ devolver roles também no refresh
-    user = db.execute(
-        select(User).where(User.email == sub, User.client_id == tenant.id)
-    ).scalar_one_or_none()
-    if not user:
-        return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
-
-    roles, primary = _collect_role_names(db, user)
-    tokens = {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
-    return _auth_response(user, tokens, roles, primary)
-
-@router.post("/logout")
-def logout(
-    token: str | None = Body(default=None, embed=True),
-    token_q: str | None = Query(default=None, alias="token"),
-    db: Session = Depends(get_db),
-    tenant = Depends(get_tenant),
-):
-    tok = _get_token_from_body_or_query(token, token_q)
-    payload = decode_refresh(tok)
-    if RefreshToken is not None and payload and payload.get("tenant") == tenant.slug and "jti" in payload:
-        rt = db.execute(select(RefreshToken).where(RefreshToken.jti == payload["jti"])).scalar_one_or_none()  # type: ignore
-        if rt and getattr(rt, "revoked_at", None) is None:
-            rt.revoked_at = datetime.utcnow().replace(tzinfo=timezone.utc)
-            db.add(rt)
-            db.commit()
-    return {"ok": True}
+    return {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+        "token_type": "bearer",
+        "user": _user_payload(db, user),
+    }

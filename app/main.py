@@ -12,7 +12,10 @@ import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
-
+from app.models.user_role import user_roles  # <-- precisa estar importado
+from app.models.user import User
+from app.models.role import Role
+from app.models.client import Client
 
 app = FastAPI(title="Eventos API")
 
