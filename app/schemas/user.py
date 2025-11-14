@@ -21,13 +21,15 @@ class UserUpdate(BaseModel):
     mfa: Optional[bool] = None
     password: Optional[str] = Field(default=None, min_length=6)
     roles: Optional[List[RoleName]] = None  # substitui conjunto de papéis (se enviado)
-
+    
 class UserOut(BaseModel):
     id: int
     name: str
-    email: EmailStr
-    status: str
+    email: str          # <- era EmailStr; deixar str até normalizar o banco
+    status: Optional[str] = None
     mfa: Optional[bool] = None
     roles: List[str] = []
+    role: Optional[str] = None
+
 
     model_config = {"from_attributes": True}
