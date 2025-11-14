@@ -20,14 +20,6 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     status = Column(String(20), nullable=False, default="active")
     mfa = Column(Boolean, default=False)
-
-    # Relacionamento com Client (use exatamente o mesmo back_populates do Client)
-    client = relationship("Client", back_populates="users")
-
-    # ✅ Relacionamento M2M com Role (era o que causava o erro)
-    roles = relationship(
-        "Role",
-        secondary=user_roles,
-        back_populates="users",
-        lazy="selectin",
-    )
+    
+    client = relationship("Client", back_populates="users")  # <- necessário
+    roles = relationship("Role", secondary=user_roles, back_populates="users")

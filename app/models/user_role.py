@@ -1,15 +1,12 @@
-from sqlalchemy import Table, Column, Integer, ForeignKey
-
-# Compatível com seus layouts (base_class ou base)
-try:
-    from app.db.base_class import Base
-except Exception:
-    from app.db.base import Base  # type: ignore
-
+from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+from app.db.base import Base
+from sqlalchemy import Table, Column, Integer, ForeignKey, UniqueConstraint
 
 user_roles = Table(
     "user_roles",
     Base.metadata,
-    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
-    Column("role_id", Integer, ForeignKey("roles.id"), primary_key=True),
+    Column("user_id", ForeignKey("users.id"), primary_key=True),
+    Column("role_id", ForeignKey("roles.id"), primary_key=True),
+    UniqueConstraint("user_id", "role_id", name="uq_user_role"),
 )

@@ -6,17 +6,14 @@ from typing import Tuple, List, Optional, Set
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 import sqlalchemy as sa
 from sqlalchemy import select, join
-from app.models.role import Role
-from app.models.user_role import user_roles
 from app.api.deps import get_db, get_tenant
 from app.core.tokens import create_access_token, create_refresh_token, decode_refresh
 from app.core.security_password import verify_and_maybe_upgrade
 from app.models.user import User
 from app.models.role import Role
-
+from app.models.user_role import user_roles
 # ---- imports tolerantes (evita boot crash se o nome do arquivo/model variar) ----
 RefreshToken = None  # type: ignore
 try:
