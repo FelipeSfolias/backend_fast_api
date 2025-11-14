@@ -16,6 +16,7 @@ class Base(DeclarativeBase):
 # 🔴 IMPORTE TODOS OS MODELS AQUI
 from app.models.client import Client
 from app.models.user import User
+from app.models.user_role import user_roles
 from app.models.role import Role
 from app.models.student import Student
 from app.models.event import Event
