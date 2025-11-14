@@ -7,7 +7,7 @@ Create Date: 2025-11-12 00:00:00
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20251107_rbac_roles_portaria"
+revision = "a9f89ac8c02f"
 down_revision = "90d35432c0e8"
 branch_labels = None
 depends_on = None
