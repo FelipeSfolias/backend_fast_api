@@ -7,7 +7,6 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.rbac import require_min_role, ROLE_PORTARIA
 from app.models.enrollment import Enrollment as EnrollmentModel

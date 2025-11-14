@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
-
+from app.api.v1.users import require_roles
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.models.enrollment import Enrollment
 from app.models.student import Student
@@ -124,7 +124,8 @@ def list_enrollments_by_event(
 
 # ------------------------ endpoints: CREATE/CANCEL ------------------------
 
-@router.post("/events/{event_id}/enroll", status_code=201)
+@router.post("/events/{event_id}/enroll", status_code=201,
+             dependencies=[Depends(require_roles("organizer","admin"))])
 def enroll_student(
     event_id: int,
     student_id: int = Query(..., alias="student_id"),
@@ -185,7 +186,8 @@ def enroll_student(
     return _enr_to_dict(enr)
 
 # aceita POST, PUT e PATCH
-@router.api_route("/enrollments/{enr_id}/cancel", methods=["POST", "PUT", "PATCH"])
+@router.api_route("/enrollments/{enr_id}/cancel", methods=["POST","PUT","PATCH"],
+                  dependencies=[Depends(require_roles("organizer","admin"))])
 def cancel_enrollment(
     enr_id: int,
     db: Session = Depends(get_db),

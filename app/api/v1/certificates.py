@@ -5,8 +5,8 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import select
-
+from sqlalchemy import select, and_
+from app.models.user import User
 from app.api.deps import get_db, get_tenant, get_current_user_scoped
 from app.core.rbac import require_roles
 from app.core.config import settings
@@ -133,6 +133,88 @@ def get_certificate(
         raise HTTPException(status_code=404, detail="Certificate not found")
     return _to_out(c)
 
+def _roles_set(u) -> set[str]:
+    roles = getattr(u, "roles", []) or getattr(u, "role_names", [])
+    out: set[str] = set()
+    for r in roles:
+        if isinstance(r, str):
+            out.add(r.lower())
+        elif hasattr(r, "name"):
+            out.add(str(r.name).lower())
+    return out
+
+@router.get("/by-student/{student_id}",
+            dependencies=[Depends(require_roles("admin","organizer","portaria","aluno"))])
+def list_certificates_by_student(
+    student_id: int,
+    db: Session = Depends(get_db),
+    tenant = Depends(get_tenant),
+    current = Depends(get_current_user_scoped),
+):
+    """
+    Retorna todos os certificados de um aluno (student_id) do tenant atual.
+    - admin/organizer/portaria: podem consultar qualquer aluno do tenant.
+    - aluno: só pode consultar o próprio student_id (validado por e-mail).
+    """
+    # valida aluno + tenant
+    stu = db.scalar(select(Student).where(Student.id == student_id))
+    if not stu or getattr(stu, "client_id", None) != tenant.id:
+        raise HTTPException(404, detail="Student not found")
+
+    roles = _roles_set(current)
+    if "aluno" in roles:
+        # vínculo por e-mail (modelo atual); se você já tiver FK student.user_id, trocamos por ela
+        cur_email = (getattr(current, "email", "") or "").lower().strip()
+        if (stu.email or "").lower().strip() != cur_email:
+            raise HTTPException(403, detail="Forbidden")
+
+    stmt = (
+        select(Certificate, Enrollment, Student, Event)
+        .join(Enrollment, Enrollment.id == Certificate.enrollment_id)
+        .join(Student, Student.id == Enrollment.student_id)
+        .join(Event, Event.id == Enrollment.event_id)
+        .where(
+            Student.id == student_id,
+            Event.client_id == tenant.id,   # garante escopo
+        )
+        .order_by(Certificate.issued_at.desc())
+    )
+
+    rows = db.execute(stmt).all()
+    out: List[dict] = []
+    for cert, enr, stu, ev in rows:
+        cert_status = cert.status.value if hasattr(cert.status, "value") else str(cert.status)
+        enr_status = enr.status.value if hasattr(enr.status, "value") else str(enr.status)
+        out.append({
+            "certificate": {
+                "id": cert.id,
+                "status": cert_status,
+                "issued_at": cert.issued_at,
+                "pdf_url": cert.pdf_url,
+                "verify_code": cert.verify_code,
+            },
+            "enrollment": {
+                "id": enr.id,
+                "status": enr_status,
+            },
+            "student": {
+                "id": stu.id,
+                "name": stu.name,
+                "email": stu.email,
+                "cpf": stu.cpf,
+                "ra": stu.ra,
+                "phone": stu.phone,
+            },
+            "event": {
+                "id": ev.id,
+                "title": ev.title,
+                "venue": ev.venue,
+                "workload_hours": ev.workload_hours,
+                "start_at": ev.start_at,
+                "end_at": ev.end_at,
+            },
+        })
+    return out
 # -------------------- verificação pública --------------------
 
 @verify_router.get("/{code}")
