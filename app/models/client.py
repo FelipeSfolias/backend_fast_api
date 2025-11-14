@@ -22,7 +22,6 @@ class Client(Base):
 
     config_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
     users = relationship("User", back_populates="client")
     students = relationship("Student", back_populates="client")
     events = relationship("Event", back_populates="client")

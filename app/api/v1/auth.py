@@ -165,7 +165,7 @@ async def login(
     ensure_password_policy(password)
 
     user = db.execute(
-        select(User).where(User.email == email, User.client.has(slug=tenant.slug))
+        select(User).where(User.email == email, User.client_id == tenant.id)
     ).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
@@ -214,7 +214,7 @@ def login_oauth2_form(
     ensure_password_policy(password)
 
     user = db.execute(
-        select(User).where(User.email == email, User.client.has(slug=tenant.slug))
+        select(User).where(User.email == email, User.client_id == tenant.id)
     ).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
@@ -277,7 +277,7 @@ def refresh(
 
     # carrega o usuário p/ devolver roles também no refresh
     user = db.execute(
-        select(User).where(User.email == sub, User.client.has(slug=tenant.slug))
+        select(User).where(User.email == sub, User.client_id == tenant.id)
     ).scalar_one_or_none()
     if not user:
         return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
