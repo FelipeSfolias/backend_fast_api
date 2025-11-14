@@ -1,6 +1,7 @@
 # app/api/v1/auth.py
 from __future__ import annotations
 from datetime import datetime, timezone
+import email
 from urllib.parse import parse_qs
 from typing import Tuple, List, Optional, Set
 from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request
@@ -225,9 +226,12 @@ def refresh(
     sub = payload.get("sub")
     scope = payload.get("scope", "")
 
-    user = db.execute(
-        select(User).where(User.email == sub, User.client_id == tenant.id)
-    ).scalar_one_or_none()
+    user = db.scalars(
+    select(User)
+    .where(User.email == email, User.client_id == tenant.id)
+    .order_by(User.id.desc())
+    .limit(1)
+).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found for this tenant")
 
